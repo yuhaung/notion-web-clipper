@@ -1,16 +1,19 @@
 // ==UserScript==
-// @name         Notion Web Clipper (v16.14 Twitter对话全量提取)
-// @namespace    http://tampermonkey.net/
+// @name         Notion Web Clipper
+// @namespace    https://github.com/yuhaung/notion-web-clipper
 // @version      16.14
-// @description  悬停高亮 + 单击选取，按钮可拖拽贴边，知乎动图转视频，分批发送，Twitter详情页自动提取全部回复。
-// @author       You
+// @description  悬停高亮 + 单击选取，支持图文视频混合剪藏（知乎/Twitter优化），按钮可拖拽贴边，分批发送，自动填充属性。
+// @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @connect      api.notion.com
 // @connect      *
-// @run-at       document-idle
+// @license      MIT
+// @supportURL   https://github.com/yuhaung/notion-web-clipper/issues
+// @updateURL    https://raw.githubusercontent.com/yuhaung/notion-web-clipper/main/notion-web-clipper.user.js
+// @downloadURL  https://raw.githubusercontent.com/yuhaung/notion-web-clipper/main/notion-web-clipper.user.js
 // ==/UserScript==
 
 (function () {
