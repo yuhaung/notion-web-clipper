@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      16.14
-// @description  悬停高亮 + 单击选取，支持图文视频混合剪藏（知乎/Twitter优化），按钮可拖拽贴边，分批发送，自动填充属性。
+// @version      1.0
+// @description  悬停高亮 + 单击选取，将网页内容（文字、图片、视频）剪藏到 Notion 数据库，支持知乎/Twitter 深度优化。
 // @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
