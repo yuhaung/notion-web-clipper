@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      1.0
-// @description  悬停高亮 + 单击选取，将网页内容（文字、图片、视频）剪藏到 Notion 数据库，支持知乎/Twitter 深度优化。
+// @version      1.2
+// @description  悬停高亮 + 单击选取，将网页内容（文字、图片、视频）剪藏到 Notion 数据库，支持知乎/Twitter 深度优化，大图时自动隐藏按钮，防止 iframe 内重复运行。
 // @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -19,7 +19,10 @@
 (function () {
     'use strict';
 
-    // 防重复
+    // ✨ 防止在 iframe 中重复运行（只允许顶层窗口）
+    if (window.self !== window.top) return;
+
+    // 防重复：移除旧的宿主元素（以防之前的脚本残留）
     const oldHost = document.getElementById('nc-host');
     if (oldHost) oldHost.remove();
 
@@ -182,7 +185,7 @@
     `;
     shadow.appendChild(uiContainer);
 
-    // ==================== DOM 引用 ====================
+    // 内部 DOM 引用
     const btn = shadow.querySelector('.nc-clipper-btn');
     const selectTip = shadow.querySelector('.nc-select-tip');
     const highlightOverlay = shadow.querySelector('.nc-highlight-overlay');
@@ -223,6 +226,9 @@
     const KEY_TOP = 'nc_btn_top';
     const KEY_HIDDEN = 'nc_btn_hidden';
     const KEY_EDGE = 'nc_btn_edge';
+
+    // 大图隐藏相关
+    let isHiddenForLargeImage = false;
 
     function isOurUI(el) { return el === host; }
 
@@ -341,7 +347,7 @@
 
     // ==================== 按钮拖拽事件 ====================
     btn.addEventListener('mouseenter', () => {
-        if (isDragging) return;
+        if (isDragging || isHiddenForLargeImage) return;
         if (isHidden) {
             const rect = btn.getBoundingClientRect();
             const fullPos = getFullPosFromHidden(hiddenEdge, rect.left, rect.top);
@@ -450,7 +456,42 @@
         }
     });
 
-    // ==================== 媒体辅助 ====================
+    // ==================== 大图检测，自动隐藏按钮 ====================
+    function isLargeImage(img) {
+        const rect = img.getBoundingClientRect();
+        const winW = window.innerWidth;
+        const winH = window.innerHeight;
+        return rect.width >= winW * 0.8 || rect.height >= winH * 0.8;
+    }
+
+    document.addEventListener('mousemove', function(e) {
+        if (isDragging || isSelecting) return;
+        const target = document.elementFromPoint(e.clientX, e.clientY);
+        if (target && target.tagName === 'IMG' && isLargeImage(target)) {
+            if (!isHiddenForLargeImage) {
+                isHiddenForLargeImage = true;
+                btn.style.display = 'none';
+            }
+        } else {
+            if (isHiddenForLargeImage) {
+                isHiddenForLargeImage = false;
+                btn.style.display = '';
+                if (isHidden) {
+                    const savedLeft = GM_getValue(KEY_LEFT, null);
+                    const savedTop = GM_getValue(KEY_TOP, null);
+                    if (savedLeft !== null && savedTop !== null) {
+                        const pos = getHiddenPos(hiddenEdge, savedLeft, savedTop);
+                        applyPosition(pos.left, pos.top);
+                        setHidden(hiddenEdge);
+                    }
+                } else {
+                    loadPosition();
+                }
+            }
+        }
+    }, true);
+
+    // ==================== 媒体辅助函数 ====================
     function getRealImageURL(img) {
         if (!img) return null;
         if (img.src && !img.src.startsWith('data:') && !img.src.includes('placeholder')) {
@@ -710,14 +751,14 @@
         });
     }
 
-    // ==================== 提取块（加入 Twitter 全对话处理） ====================
+    // ==================== Twitter 对话全量提取 ====================
     function extractTwitterConversationBlocks() {
         if (!isTwitterStatus) return null;
         const mainContainer = document.querySelector('main[role="main"]') || 
                              document.querySelector('div[data-testid="primaryColumn"]') || 
                              document.body;
         const tweets = mainContainer.querySelectorAll('article[data-testid="tweet"]');
-        if (tweets.length < 2) return null; // 只有一条推文则继续正常提取单条
+        if (tweets.length < 2) return null;
 
         const allBlocks = [];
         for (let i = 0; i < tweets.length; i++) {
@@ -734,11 +775,9 @@
     }
 
     function extractBlocksFromElement(el) {
-        // 先尝试提取整个 Twitter 对话
         const twitterConv = extractTwitterConversationBlocks();
         if (twitterConv) return twitterConv;
 
-        // 单独媒体
         if (el.tagName === 'IMG') {
             if (!isAvatar(el) && !isZhihuMemberImage(el)) {
                 const url = getRealImageURL(el);
@@ -760,7 +799,6 @@
                 return [media.type === 'video' ? buildVideoBlock(media.url) : buildImageBlock(media.url)];
             }
         }
-
         const clone = el.cloneNode(true);
         if (isZhihu) cleanZhihuElement(clone);
         const fragment = document.createDocumentFragment();
@@ -798,7 +836,6 @@
         }
 
         if (isTwitter) {
-            // 如果有详情页，优先返回单条推文（实际提取时仍然会获取全部对话）
             const tweet = element.closest('article[data-testid="tweet"]');
             if (tweet) return tweet;
         }
