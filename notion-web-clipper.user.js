@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      1.2
-// @description  悬停高亮 + 单击选取，将网页内容（文字、图片、视频）剪藏到 Notion 数据库，支持知乎/Twitter 深度优化，大图时自动隐藏按钮，防止 iframe 内重复运行。
+// @version      1.6
+// @description  悬停高亮 + 单击选取，预览框支持 Ctrl+A 全选内部文本，可单独删除块，自动创建标签属性，剪藏至 Notion。支持知乎/Twitter 深度优化，大图自动隐藏按钮，防 iframe 重复运行。
 // @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -19,10 +19,9 @@
 (function () {
     'use strict';
 
-    // ✨ 防止在 iframe 中重复运行（只允许顶层窗口）
+    // 防 iframe 重复运行
     if (window.self !== window.top) return;
 
-    // 防重复：移除旧的宿主元素（以防之前的脚本残留）
     const oldHost = document.getElementById('nc-host');
     if (oldHost) oldHost.remove();
 
@@ -109,19 +108,43 @@
             padding: 12px; margin-top: 8px;
             max-height: 250px; overflow-y: auto;
             background: #fafafa; font-size: 13px; line-height: 1.6;
+            user-select: text;
+            -webkit-user-select: text;
+            outline: none;
         }
         .nc-preview-box img { max-width: 100%; max-height: 150px; display: block; margin: 8px 0; border-radius: 4px; }
-        .nc-preview-box p { margin: 4px 0; color: #333; white-space: pre-wrap; }
-        .nc-preview-box h1, .nc-preview-box h2, .nc-preview-box h3 { margin: 8px 0 4px; color: #111; }
+        .nc-preview-box p { margin: 4px 0; color: #333; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
+        .nc-preview-box h1, .nc-preview-box h2, .nc-preview-box h3 { margin: 8px 0 4px; color: #111; user-select: text; -webkit-user-select: text; }
         .nc-preview-box h1 { font-size: 1.4em; }
         .nc-preview-box h2 { font-size: 1.2em; }
         .nc-preview-box h3 { font-size: 1.1em; }
-        .nc-preview-box li { margin-left: 1.5em; list-style: disc; }
-        .nc-preview-box blockquote { border-left: 3px solid #2383e2; padding-left: 10px; color: #555; margin: 8px 0; }
-        .nc-preview-box pre { background: #f0f0f0; padding: 8px; border-radius: 4px; white-space: pre-wrap; font-family: monospace; }
+        .nc-preview-box li { margin-left: 1.5em; list-style: disc; user-select: text; -webkit-user-select: text; }
+        .nc-preview-box blockquote { border-left: 3px solid #2383e2; padding-left: 10px; color: #555; margin: 8px 0; user-select: text; -webkit-user-select: text; }
+        .nc-preview-box pre { background: #f0f0f0; padding: 8px; border-radius: 4px; white-space: pre-wrap; font-family: monospace; user-select: text; -webkit-user-select: text; }
         .nc-video-preview, .nc-embed-preview {
             color: #2383e2; font-weight: 600; margin: 8px 0;
             background: #eef4fb; padding: 6px 10px; border-radius: 4px;
+            user-select: text; -webkit-user-select: text;
+        }
+        .nc-preview-item {
+            position: relative;
+            margin: 2px 0;
+        }
+        .nc-preview-delete {
+            position: absolute;
+            top: 2px; right: 2px;
+            width: 20px; height: 20px;
+            background: #ff3b30; color: #fff;
+            border: none; border-radius: 50%;
+            font-size: 12px; line-height: 20px;
+            text-align: center; cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.15s;
+            z-index: 2;
+            pointer-events: auto;
+        }
+        .nc-preview-item:hover .nc-preview-delete {
+            opacity: 1;
         }
         .nc-success-message {
             font-size: 15px; color: #2d7d46; font-weight: 600; text-align: center; margin: 8px 0;
@@ -161,8 +184,8 @@
                 <h2>✂️ 确认发送</h2>
                 <label>页面标题</label>
                 <input type="text" id="nc-title" autocomplete="off">
-                <label>内容预览 (图文视频混合)</label>
-                <div class="nc-preview-box" id="nc-preview"></div>
+                <label>内容预览 (Ctrl+A 全选框内文本，点击 ❌ 删除块)</label>
+                <div class="nc-preview-box" id="nc-preview" tabindex="0"></div>
                 <label>标签 (逗号分隔，可选)</label>
                 <input type="text" id="nc-tags" placeholder="例如: 阅读, 技术" autocomplete="off">
                 <div class="nc-btn-row">
@@ -185,7 +208,7 @@
     `;
     shadow.appendChild(uiContainer);
 
-    // 内部 DOM 引用
+    // ==================== DOM 引用 ====================
     const btn = shadow.querySelector('.nc-clipper-btn');
     const selectTip = shadow.querySelector('.nc-select-tip');
     const highlightOverlay = shadow.querySelector('.nc-highlight-overlay');
@@ -889,9 +912,34 @@
         if (e.key === 'Escape') {
             e.preventDefault();
             if (isSelecting) stopSelectMode();
-            if (isConfirmOpen) { confirmOverlay.style.display = 'none'; isConfirmOpen = false; }
-            if (successOverlay.style.display === 'flex') successOverlay.style.display = 'none';
         }
+    }
+
+    // 确认弹窗专用键盘事件（Ctrl+A / Esc）
+    function onConfirmKeydown(e) {
+        if (!isConfirmOpen) return;
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeConfirmModal();
+            return;
+        }
+        if (e.ctrlKey && e.key === 'a') {
+            const active = shadow.activeElement || document.activeElement;
+            if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+            e.preventDefault();
+            previewBox.focus();
+            const range = document.createRange();
+            range.selectNodeContents(previewBox);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+        }
+    }
+
+    function closeConfirmModal() {
+        confirmOverlay.style.display = 'none';
+        isConfirmOpen = false;
+        document.removeEventListener('keydown', onConfirmKeydown, true);
     }
 
     function removeHighlight() { highlightOverlay.style.display = 'none'; highlightedEl = null; }
@@ -916,36 +964,86 @@
     }
 
     // ==================== 弹窗 ====================
-    function renderBlockToPreview(block, container) {
+    function renderBlockToPreview(block, container, index) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'nc-preview-item';
+        wrapper.dataset.index = index;
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'nc-preview-delete';
+        delBtn.innerHTML = '❌';
+        delBtn.title = '删除此块';
+        wrapper.appendChild(delBtn);
+
+        let content;
         if (block.type === 'paragraph') {
-            const p = document.createElement('p'); p.textContent = block.paragraph.rich_text[0].text.content; container.appendChild(p);
+            content = document.createElement('p');
+            content.textContent = block.paragraph.rich_text[0].text.content;
         } else if (block.type.startsWith('heading')) {
             const level = block.type.split('_')[1];
-            const h = document.createElement(`h${level}`); h.textContent = block[block.type].rich_text[0].text.content; container.appendChild(h);
+            content = document.createElement(`h${level}`);
+            content.textContent = block[block.type].rich_text[0].text.content;
         } else if (block.type === 'bulleted_list_item') {
-            const li = document.createElement('li'); li.textContent = block.bulleted_list_item.rich_text[0].text.content; container.appendChild(li);
+            content = document.createElement('li');
+            content.textContent = block.bulleted_list_item.rich_text[0].text.content;
         } else if (block.type === 'numbered_list_item') {
-            const li = document.createElement('li'); li.textContent = block.numbered_list_item.rich_text[0].text.content; container.appendChild(li);
+            content = document.createElement('li');
+            content.textContent = block.numbered_list_item.rich_text[0].text.content;
         } else if (block.type === 'quote') {
-            const bq = document.createElement('blockquote'); bq.textContent = block.quote.rich_text[0].text.content; container.appendChild(bq);
+            content = document.createElement('blockquote');
+            content.textContent = block.quote.rich_text[0].text.content;
         } else if (block.type === 'code') {
-            const pre = document.createElement('pre'); pre.textContent = block.code.rich_text[0].text.content; container.appendChild(pre);
+            content = document.createElement('pre');
+            content.textContent = block.code.rich_text[0].text.content;
         } else if (block.type === 'image') {
-            const img = document.createElement('img'); img.src = block.image.external.url; img.onerror = () => img.style.display = 'none'; container.appendChild(img);
+            content = document.createElement('img');
+            content.src = block.image.external.url;
+            content.onerror = () => { content.style.display = 'none'; };
         } else if (block.type === 'video') {
-            const div = document.createElement('div'); div.className = 'nc-video-preview'; div.textContent = `🎬 视频: ${block.video.external.url}`; container.appendChild(div);
+            content = document.createElement('div');
+            content.className = 'nc-video-preview';
+            content.textContent = `🎬 视频: ${block.video.external.url}`;
         } else if (block.type === 'embed') {
-            const div = document.createElement('div'); div.className = 'nc-embed-preview'; div.textContent = `📺 嵌入: ${block.embed.url}`; container.appendChild(div);
+            content = document.createElement('div');
+            content.className = 'nc-embed-preview';
+            content.textContent = `📺 嵌入: ${block.embed.url}`;
         }
+        if (content) wrapper.appendChild(content);
+        container.appendChild(wrapper);
     }
+
+    function refreshPreview() {
+        previewBox.innerHTML = '';
+        if (currentNotionBlocks.length === 0) {
+            previewBox.textContent = '无内容';
+            return;
+        }
+        currentNotionBlocks.forEach((block, idx) => {
+            renderBlockToPreview(block, previewBox, idx);
+        });
+    }
+
+    previewBox.addEventListener('click', (e) => {
+        const deleteBtn = e.target.closest('.nc-preview-delete');
+        if (!deleteBtn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const item = deleteBtn.closest('.nc-preview-item');
+        if (!item) return;
+        const index = parseInt(item.dataset.index, 10);
+        if (!isNaN(index) && index >= 0 && index < currentNotionBlocks.length) {
+            currentNotionBlocks.splice(index, 1);
+            refreshPreview();
+        }
+    });
 
     function showConfirmModal(title) {
         titleInput.value = title;
         tagsInput.value = '';
-        previewBox.innerHTML = '';
-        currentNotionBlocks.forEach(block => renderBlockToPreview(block, previewBox));
+        refreshPreview();
         confirmOverlay.style.display = 'flex';
         isConfirmOpen = true;
+        document.addEventListener('keydown', onConfirmKeydown, true);
     }
 
     function openSettings() {
@@ -1005,17 +1103,37 @@
         const tagsPropName = GM_getValue('notion_tags_prop', 'Tags').trim();
         try {
             const dbInfo = await notionRequest('GET', `https://api.notion.com/v1/databases/${dbId}`);
-            const dbProps = dbInfo.properties;
+            let dbProps = dbInfo.properties;
+
+            // ===== 自动创建标签属性（如果不存在且用户输入了标签） =====
+            if (tagsPropName && tags.length > 0 && !dbProps[tagsPropName]) {
+                try {
+                    await notionRequest('PATCH', `https://api.notion.com/v1/databases/${dbId}`, {
+                        properties: {
+                            [tagsPropName]: { type: 'multi_select', multi_select: {} }
+                        }
+                    });
+                    dbProps[tagsPropName] = { type: 'multi_select' };
+                } catch (e) {
+                    console.warn('自动创建标签属性失败，将跳过标签写入', e);
+                }
+            }
+
+            // 标题属性名
             let realTitlePropName = 'Name';
             for (const key in dbProps) {
                 if (dbProps[key].type === 'title') { realTitlePropName = key; break; }
             }
             const properties = { [realTitlePropName]: { "title": [{ "text": { "content": title.substring(0, 200) } }] } };
+
+            // 写入标签
             if (tagsPropName && tags.length > 0 && dbProps[tagsPropName]) {
                 const propType = dbProps[tagsPropName].type;
                 if (propType === 'select') properties[tagsPropName] = { "select": { "name": tags[0] } };
                 else if (propType === 'multi_select') properties[tagsPropName] = { "multi_select": tags.map(t => ({ "name": t })) };
             }
+
+            // 其他自动属性（URL、Content Image、Icon）
             if (dbProps['URL'] && dbProps['URL'].type === 'url') properties['URL'] = { "url": window.location.href };
             if (dbProps['Content Image'] && dbProps['Content Image'].type === 'url') {
                 const mainImg = getPageMainImage();
@@ -1037,7 +1155,7 @@
                 await appendBlocks(pageId, remaining);
             }
 
-            confirmOverlay.style.display = 'none'; isConfirmOpen = false;
+            closeConfirmModal();
             showSuccessModal(pageId);
         } catch (error) {
             console.error(error);
@@ -1057,7 +1175,7 @@
         settingsOverlay.style.display = 'none';
         alert('✅ 保存成功！');
     });
-    shadow.querySelector('#nc-confirm-cancel').addEventListener('click', () => { confirmOverlay.style.display = 'none'; isConfirmOpen = false; });
+    shadow.querySelector('#nc-confirm-cancel').addEventListener('click', () => closeConfirmModal());
     shadow.querySelector('#nc-confirm-send').addEventListener('click', sendToNotion);
     successOpenBtn.addEventListener('click', () => {
         if (!lastCreatedPageId) return;
