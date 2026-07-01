@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      1.7
-// @description  悬停高亮 + 单击选取，保留超链接，预览框支持 Ctrl+A 全选内部文本，自动创建标签属性，剪藏至 Notion。支持知乎/Twitter 深度优化，大图自动隐藏按钮。
+// @version      1.9
+// @description  悬停高亮 + 单击选取，保留超链接，自动提取高清网站图标作为页面图标，Ctrl+A 全选预览框，自动创建标签属性，知乎/Twitter 优化，大图隐藏按钮。
 // @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -610,11 +610,66 @@
         return '';
     }
 
+    // ==================== 高清网站图标提取 ====================
     function getPageIcon() {
-        const links = document.querySelectorAll('link[rel="icon"], link[rel="shortcut icon"]');
-        for (const link of links) {
-            if (link.href) return link.href;
+        // 按优先级查找高清图标链接
+        const icons = document.querySelectorAll('link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"], link[rel="mask-icon"], link[rel="icon"], link[rel="shortcut icon"]');
+        let bestHref = '';
+        let bestSize = 0;
+
+        for (const link of icons) {
+            const href = link.href;
+            if (!href) continue;
+
+            // 排除 data: URI
+            if (href.startsWith('data:')) continue;
+
+            // SVG 图标优先于任何位图
+            if (link.type === 'image/svg+xml' || href.endsWith('.svg')) {
+                return href; // SVG 最佳，直接返回
+            }
+
+            // 解析 sizes 属性
+            const sizes = link.getAttribute('sizes');
+            if (sizes) {
+                // 取最后一个尺寸（例如 "32x32 64x64" 取最大）
+                const parts = sizes.trim().split(/\s+/);
+                for (const part of parts) {
+                    const match = part.match(/^(\d+)x(\d+)$/i);
+                    if (match) {
+                        const w = parseInt(match[1], 10);
+                        const h = parseInt(match[2], 10);
+                        const area = w * h;
+                        if (area > bestSize) {
+                            bestSize = area;
+                            bestHref = href;
+                        }
+                    } else if (part.toLowerCase() === 'any') {
+                        // "any" 表示矢量，优先使用
+                        return href;
+                    }
+                }
+            } else {
+                // 没有 sizes 属性的图标，视为小图标，除非是 apple-touch-icon（默认 180x180）
+                if (link.rel === 'apple-touch-icon' || link.rel === 'apple-touch-icon-precomposed') {
+                    // 默认大小 180x180，实际可能不同，但仍作为备选
+                    if (180 * 180 > bestSize) {
+                        bestSize = 180 * 180;
+                        bestHref = href;
+                    }
+                } else {
+                    // 普通 favicon 无尺寸，假定为 16x16
+                    if (16 * 16 > bestSize) {
+                        bestSize = 16 * 16;
+                        bestHref = href;
+                    }
+                }
+            }
         }
+
+        if (bestHref) return bestHref;
+
+        // 最后尝试网站根目录 favicon.ico
         return window.location.origin + '/favicon.ico';
     }
 
@@ -624,7 +679,6 @@
         return { object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: safeText } }] } };
     }
 
-    // 构建带链接的富文本块
     function buildRichTextBlock(richTextArray) {
         let totalLen = 0;
         const truncated = [];
@@ -686,10 +740,10 @@
         return clone;
     }
 
-    // ==================== 内容解析（支持超链接） ====================
+    // ==================== 内容解析 ====================
     function parseFragmentToBlocks(fragment) {
         const blocks = [];
-        let currentFragments = []; // 每个片段 { text: "内容", link: "url" 或 null }
+        let currentFragments = [];
 
         const flushFragments = () => {
             if (currentFragments.length === 0) return;
@@ -724,7 +778,6 @@
             currentFragments = [];
         };
 
-        // 递归收集元素内部的纯文本（用于 A 标签等）
         function getInnerText(node) {
             if (node.nodeType === Node.TEXT_NODE) return node.textContent;
             if (node.nodeType === Node.ELEMENT_NODE) {
@@ -742,7 +795,6 @@
                 const tag = node.tagName.toUpperCase();
                 if (tag === 'STYLE' || tag === 'SCRIPT' || tag === 'NOSCRIPT') return;
 
-                // 知乎 GifPlayer 容器
                 if (node.classList && node.classList.contains('GifPlayer')) {
                     flushFragments();
                     const media = getGifPlayerMediaURL(node);
@@ -840,7 +892,6 @@
                     return;
                 }
 
-                // 块级元素：先 flush，再递归子节点，最后 flush
                 if (['P', 'DIV', 'SECTION', 'ARTICLE', 'ASIDE', 'HEADER', 'FOOTER', 'MAIN', 'UL', 'OL', 'DL', 'TABLE', 'FORM', 'FIELDSET'].includes(tag)) {
                     flushFragments();
                     node.childNodes.forEach(walk);
@@ -863,7 +914,7 @@
         });
     }
 
-    // ==================== Twitter 对话全量提取 ====================
+    // ==================== Twitter 对话提取 ====================
     function extractTwitterConversationBlocks() {
         if (!isTwitterStatus) return null;
         const mainContainer = document.querySelector('main[role="main"]') || 
@@ -1004,7 +1055,6 @@
         }
     }
 
-    // 确认弹窗专用键盘事件（Ctrl+A / Esc）
     function onConfirmKeydown(e) {
         if (!isConfirmOpen) return;
         if (e.key === 'Escape') {
@@ -1067,7 +1117,6 @@
         let content;
         if (block.type === 'paragraph') {
             const p = document.createElement('p');
-            // 将 rich_text 渲染为 HTML（仅预览用）
             if (block.paragraph.rich_text && block.paragraph.rich_text.length > 0) {
                 let html = '';
                 for (const rt of block.paragraph.rich_text) {
@@ -1209,35 +1258,30 @@
             const dbInfo = await notionRequest('GET', `https://api.notion.com/v1/databases/${dbId}`);
             let dbProps = dbInfo.properties;
 
-            // 自动创建标签属性（如果不存在且用户输入了标签）
+            // 自动创建标签属性
             if (tagsPropName && tags.length > 0 && !dbProps[tagsPropName]) {
                 try {
                     await notionRequest('PATCH', `https://api.notion.com/v1/databases/${dbId}`, {
-                        properties: {
-                            [tagsPropName]: { type: 'multi_select', multi_select: {} }
-                        }
+                        properties: { [tagsPropName]: { type: 'multi_select', multi_select: {} } }
                     });
                     dbProps[tagsPropName] = { type: 'multi_select' };
                 } catch (e) {
-                    console.warn('自动创建标签属性失败，将跳过标签写入', e);
+                    console.warn('自动创建标签属性失败', e);
                 }
             }
 
-            // 标题属性名
             let realTitlePropName = 'Name';
             for (const key in dbProps) {
                 if (dbProps[key].type === 'title') { realTitlePropName = key; break; }
             }
             const properties = { [realTitlePropName]: { "title": [{ "text": { "content": title.substring(0, 200) } }] } };
 
-            // 写入标签
             if (tagsPropName && tags.length > 0 && dbProps[tagsPropName]) {
                 const propType = dbProps[tagsPropName].type;
                 if (propType === 'select') properties[tagsPropName] = { "select": { "name": tags[0] } };
                 else if (propType === 'multi_select') properties[tagsPropName] = { "multi_select": tags.map(t => ({ "name": t })) };
             }
 
-            // 其他自动属性
             if (dbProps['URL'] && dbProps['URL'].type === 'url') properties['URL'] = { "url": window.location.href };
             if (dbProps['Content Image'] && dbProps['Content Image'].type === 'url') {
                 const mainImg = getPageMainImage();
@@ -1250,7 +1294,18 @@
 
             const children = currentNotionBlocks;
             const firstBatch = children.length <= 100 ? children : children.slice(0, 100);
-            const data = { parent: { database_id: dbId }, properties, children: firstBatch };
+            const data = {
+                parent: { database_id: dbId },
+                properties,
+                children: firstBatch
+            };
+
+            // 设置页面图标（使用高清图标）
+            const iconUrl = getPageIcon();
+            if (iconUrl) {
+                data.icon = { type: "external", external: { url: iconUrl } };
+            }
+
             const response = await notionRequest('POST', 'https://api.notion.com/v1/pages', data);
             const pageId = response.id;
 
