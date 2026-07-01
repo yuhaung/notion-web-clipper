@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      1.6
-// @description  悬停高亮 + 单击选取，预览框支持 Ctrl+A 全选内部文本，可单独删除块，自动创建标签属性，剪藏至 Notion。支持知乎/Twitter 深度优化，大图自动隐藏按钮，防 iframe 重复运行。
+// @version      1.7
+// @description  悬停高亮 + 单击选取，保留超链接，预览框支持 Ctrl+A 全选内部文本，自动创建标签属性，剪藏至 Notion。支持知乎/Twitter 深度优化，大图自动隐藏按钮。
 // @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -623,6 +623,29 @@
         const safeText = text.length > 1990 ? text.substring(0, 1990) + '...' : text;
         return { object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: safeText } }] } };
     }
+
+    // 构建带链接的富文本块
+    function buildRichTextBlock(richTextArray) {
+        let totalLen = 0;
+        const truncated = [];
+        for (const item of richTextArray) {
+            if (totalLen >= 2000) break;
+            let content = item.text.content;
+            if (totalLen + content.length > 2000) {
+                content = content.substring(0, 2000 - totalLen) + '...';
+            }
+            totalLen += content.length;
+            truncated.push({
+                type: "text",
+                text: {
+                    content: content,
+                    link: item.text.link || undefined
+                }
+            });
+        }
+        return { object: "block", type: "paragraph", paragraph: { rich_text: truncated } };
+    }
+
     function buildHeadingBlock(level, text) {
         const type = `heading_${level}`;
         return { object: "block", type, [type]: { rich_text: [{ type: "text", text: { content: text } }] } };
@@ -663,25 +686,65 @@
         return clone;
     }
 
-    // ==================== 内容解析 ====================
+    // ==================== 内容解析（支持超链接） ====================
     function parseFragmentToBlocks(fragment) {
         const blocks = [];
-        let currentText = '';
-        const flushText = (trim = true) => {
-            let text = trim ? currentText.trim() : currentText;
-            text = text.replace(/\n{3,}/g, '\n\n');
-            if (text) blocks.push(buildTextBlock(text));
-            currentText = '';
+        let currentFragments = []; // 每个片段 { text: "内容", link: "url" 或 null }
+
+        const flushFragments = () => {
+            if (currentFragments.length === 0) return;
+            const nonEmpty = currentFragments.filter(f => f.text.trim() !== '');
+            if (nonEmpty.length === 0) {
+                currentFragments = [];
+                return;
+            }
+            const hasLink = nonEmpty.some(f => f.link);
+            if (hasLink) {
+                const richTexts = [];
+                let tempText = '';
+                for (const frag of nonEmpty) {
+                    if (!frag.link) {
+                        tempText += frag.text;
+                    } else {
+                        if (tempText) {
+                            richTexts.push({ text: { content: tempText } });
+                            tempText = '';
+                        }
+                        richTexts.push({ text: { content: frag.text, link: { url: frag.link } } });
+                    }
+                }
+                if (tempText) {
+                    richTexts.push({ text: { content: tempText } });
+                }
+                blocks.push(buildRichTextBlock(richTexts));
+            } else {
+                const fullText = nonEmpty.map(f => f.text).join('');
+                blocks.push(buildTextBlock(fullText));
+            }
+            currentFragments = [];
         };
+
+        // 递归收集元素内部的纯文本（用于 A 标签等）
+        function getInnerText(node) {
+            if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                const tag = node.tagName.toUpperCase();
+                if (tag === 'IMG' || tag === 'VIDEO' || tag === 'IFRAME') return '';
+                return Array.from(node.childNodes).map(getInnerText).join('');
+            }
+            return '';
+        }
+
         const walk = (node) => {
             if (node.nodeType === Node.TEXT_NODE) {
-                currentText += node.textContent;
+                currentFragments.push({ text: node.textContent, link: null });
             } else if (node.nodeType === Node.ELEMENT_NODE) {
                 const tag = node.tagName.toUpperCase();
                 if (tag === 'STYLE' || tag === 'SCRIPT' || tag === 'NOSCRIPT') return;
 
+                // 知乎 GifPlayer 容器
                 if (node.classList && node.classList.contains('GifPlayer')) {
-                    flushText();
+                    flushFragments();
                     const media = getGifPlayerMediaURL(node);
                     if (media) {
                         if (media.type === 'video') blocks.push(buildVideoBlock(media.url));
@@ -692,84 +755,110 @@
                     return;
                 }
 
-                if (['SPAN', 'A', 'EM', 'STRONG', 'B', 'I', 'U', 'CODE', 'MARK', 'SMALL', 'SUB', 'SUP'].includes(tag)) {
+                if (tag === 'A') {
+                    const href = node.href || '';
+                    const linkText = getInnerText(node);
+                    if (linkText && href) {
+                        currentFragments.push({ text: linkText, link: href });
+                    } else if (linkText) {
+                        currentFragments.push({ text: linkText, link: null });
+                    }
+                    return;
+                }
+
+                if (['SPAN', 'EM', 'STRONG', 'B', 'I', 'U', 'CODE', 'MARK', 'SMALL', 'SUB', 'SUP'].includes(tag)) {
                     node.childNodes.forEach(walk);
                     return;
                 }
-                if (tag === 'BR') { currentText += '\n'; return; }
+
+                if (tag === 'BR') {
+                    currentFragments.push({ text: '\n', link: null });
+                    return;
+                }
+
                 if (tag === 'IMG') {
                     if (!isAvatar(node) && !isZhihuMemberImage(node)) {
-                        flushText();
+                        flushFragments();
                         const url = getRealImageURL(node);
                         if (url) blocks.push(buildImageBlock(url));
                     }
                     return;
                 }
+
                 if (tag === 'VIDEO') {
-                    flushText();
+                    flushFragments();
                     const url = getVideoURL(node);
                     if (url) blocks.push(buildVideoBlock(url));
                     return;
                 }
+
                 if (tag === 'IFRAME') {
-                    flushText();
+                    flushFragments();
                     const url = getIframeEmbedURL(node);
                     if (url) blocks.push(buildEmbedBlock(url));
                     return;
                 }
+
                 if (/^H[1-6]$/.test(tag)) {
-                    flushText(false);
-                    const headingText = node.textContent.trim();
+                    flushFragments();
+                    const headingText = getInnerText(node).trim();
                     if (headingText) blocks.push(buildHeadingBlock(parseInt(tag[1]), headingText));
-                    currentText = '';
                     return;
                 }
+
                 if (tag === 'LI') {
-                    flushText(false);
-                    const text = node.textContent.trim();
+                    flushFragments();
+                    const text = getInnerText(node).trim();
                     if (text) {
                         const parentTag = node.parentElement ? node.parentElement.tagName.toUpperCase() : '';
                         blocks.push(parentTag === 'OL' ? buildNumberedBlock(text) : buildBulletBlock(text));
                     }
-                    currentText = '';
                     return;
                 }
+
                 if (tag === 'BLOCKQUOTE') {
-                    flushText(false);
-                    const text = node.textContent.trim();
+                    flushFragments();
+                    const text = getInnerText(node).trim();
                     if (text) blocks.push(buildQuoteBlock(text));
-                    currentText = '';
                     return;
                 }
+
                 if (tag === 'PRE' || (tag === 'DIV' && node.querySelector('pre'))) {
-                    flushText(false);
+                    flushFragments();
                     const pre = tag === 'PRE' ? node : node.querySelector('pre');
                     if (pre) {
                         const codeText = pre.textContent || '';
                         const language = pre.getAttribute('data-language') || '';
                         blocks.push(buildCodeBlock(codeText, language));
                     }
-                    currentText = '';
                     return;
                 }
+
                 if (tag === 'FIGURE') {
-                    flushText(false);
+                    flushFragments();
                     node.childNodes.forEach(walk);
                     return;
                 }
+
+                // 块级元素：先 flush，再递归子节点，最后 flush
                 if (['P', 'DIV', 'SECTION', 'ARTICLE', 'ASIDE', 'HEADER', 'FOOTER', 'MAIN', 'UL', 'OL', 'DL', 'TABLE', 'FORM', 'FIELDSET'].includes(tag)) {
-                    currentText += '\n';
+                    flushFragments();
                     node.childNodes.forEach(walk);
-                    currentText += '\n';
+                    flushFragments();
                 } else {
                     node.childNodes.forEach(walk);
                 }
             }
         };
+
         fragment.childNodes.forEach(walk);
-        flushText(false);
+        flushFragments();
+
         return blocks.filter(b => {
-            if (b.type === 'paragraph' && b.paragraph.rich_text[0].text.content.trim() === '') return false;
+            if (b.type === 'paragraph' && b.paragraph.rich_text && b.paragraph.rich_text.length > 0) {
+                const content = b.paragraph.rich_text.map(t => t.text.content).join('').trim();
+                return content !== '';
+            }
             return true;
         });
     }
@@ -977,8 +1066,23 @@
 
         let content;
         if (block.type === 'paragraph') {
-            content = document.createElement('p');
-            content.textContent = block.paragraph.rich_text[0].text.content;
+            const p = document.createElement('p');
+            // 将 rich_text 渲染为 HTML（仅预览用）
+            if (block.paragraph.rich_text && block.paragraph.rich_text.length > 0) {
+                let html = '';
+                for (const rt of block.paragraph.rich_text) {
+                    const text = rt.text.content;
+                    if (rt.text.link) {
+                        html += `<a href="${rt.text.link.url}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+                    } else {
+                        html += text;
+                    }
+                }
+                p.innerHTML = html;
+            } else {
+                p.textContent = '';
+            }
+            content = p;
         } else if (block.type.startsWith('heading')) {
             const level = block.type.split('_')[1];
             content = document.createElement(`h${level}`);
@@ -1105,7 +1209,7 @@
             const dbInfo = await notionRequest('GET', `https://api.notion.com/v1/databases/${dbId}`);
             let dbProps = dbInfo.properties;
 
-            // ===== 自动创建标签属性（如果不存在且用户输入了标签） =====
+            // 自动创建标签属性（如果不存在且用户输入了标签）
             if (tagsPropName && tags.length > 0 && !dbProps[tagsPropName]) {
                 try {
                     await notionRequest('PATCH', `https://api.notion.com/v1/databases/${dbId}`, {
@@ -1133,7 +1237,7 @@
                 else if (propType === 'multi_select') properties[tagsPropName] = { "multi_select": tags.map(t => ({ "name": t })) };
             }
 
-            // 其他自动属性（URL、Content Image、Icon）
+            // 其他自动属性
             if (dbProps['URL'] && dbProps['URL'].type === 'url') properties['URL'] = { "url": window.location.href };
             if (dbProps['Content Image'] && dbProps['Content Image'].type === 'url') {
                 const mainImg = getPageMainImage();
