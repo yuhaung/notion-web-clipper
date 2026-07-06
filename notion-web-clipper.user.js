@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      2.1
-// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。
+// @version      2.1.3
+// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。修复表格块 cells 必须为数组的问题。
 // @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -50,11 +50,11 @@
         BTN_EDGE: 'nc_btn_edge',
     };
 
-    const BLOCK_TAGS = new Set(['P','DIV','SECTION','ARTICLE','LI','BLOCKQUOTE','H1','H2','H3','H4','H5','H6','PRE','CODE','TABLE','ASIDE','MAIN','HEADER','FOOTER']);
+    const BLOCK_TAGS = new Set(['P','DIV','SECTION','ARTICLE','LI','BLOCKQUOTE','H1','H2','H3','H4','H5','H6','PRE','TABLE','ASIDE','MAIN','HEADER','FOOTER']);
     const INLINE_TAGS = new Set(['SPAN','A','EM','STRONG','B','I','U','CODE','MARK','SMALL','SUB','SUP','S','DEL']);
+    const LEAF_BLOCK_TAGS = new Set(['PRE','TABLE']);
     const SKIP_TAGS = new Set(['STYLE','SCRIPT','NOSCRIPT']);
 
-    // 知乎清理选择器（去除噪音，但保留作者信息元素，后续会单独提取）
     const ZHIHU_REMOVE_SELECTORS = [
         '.ContentItem-actions','.Post-actions','.VoteButtons',
         '.ArticleHeaderActions','.ContentItem-more','.RichContent-actions',
@@ -74,7 +74,7 @@
     const $ = (sel, base = shadow) => base.querySelector(sel);
     const $$ = (sel, base = shadow) => base.querySelectorAll(sel);
 
-    // ==================== 样式 ====================
+    // ==================== 样式（完整） ====================
     const style = document.createElement('style');
     style.textContent = `
         :host { all:initial; }
@@ -284,6 +284,7 @@
     let lastCreatedPageId = null;
     let tokenVisible = false;
 
+    // 拖拽/贴边相关
     let isDragging = false;
     let dragStartX = 0, dragStartY = 0;
     let initialLeft = 0, initialTop = 0;
@@ -291,7 +292,10 @@
     let isHidden = false;
     let hiddenEdge = '';
 
+    // 大图隐藏相关
     let isHiddenForLargeImage = false;
+
+    // 缓存页面图标
     let cachedPageIcon = null;
 
     function isOurUI(el) { return el === host; }
@@ -300,7 +304,9 @@
     function showToast(message, type = 'success') {
         const toast = document.createElement('div');
         toast.className = `nc-toast nc-toast-${type}`;
-        toast.innerHTML = `<span>${message}</span>`;
+        const span = document.createElement('span');
+        span.textContent = message;
+        toast.appendChild(span);
         toastContainer.appendChild(toast);
         setTimeout(() => {
             toast.style.transition = 'opacity 0.3s ease';
@@ -311,6 +317,7 @@
 
     const alert = (msg) => showToast(msg, 'error');
 
+    // Token 显示切换
     tokenToggle.addEventListener('click', () => {
         tokenVisible = !tokenVisible;
         tokenInput.type = tokenVisible ? 'text' : 'password';
@@ -325,6 +332,7 @@
         top = Math.max(0, Math.min(top, winH - BTN_SIZE));
         return { left, top };
     }
+
     function getFullPosFromHidden(edge, hiddenLeft, hiddenTop) {
         const winW = innerWidth, winH = innerHeight;
         let left = hiddenLeft, top = hiddenTop;
@@ -334,6 +342,7 @@
         else if (edge === 'bottom') top = winH - BTN_SIZE;
         return clampFullPos(left, top);
     }
+
     function getHiddenPos(edge, fullLeft, fullTop) {
         const winW = innerWidth, winH = innerHeight;
         let left = fullLeft, top = fullTop;
@@ -343,6 +352,7 @@
         else if (edge === 'bottom') top = winH - VISIBLE_PART;
         return { left, top };
     }
+
     function applyPosition(left, top) {
         const { left: clampedLeft, top: clampedTop } = clampFullPos(left, top);
         btn.style.left = clampedLeft + 'px';
@@ -350,16 +360,19 @@
         btn.style.right = 'auto';
         btn.style.bottom = 'auto';
     }
+
     function setFullVisible() {
         btn.classList.remove('nc-hidden-edge');
         isHidden = false;
         hiddenEdge = '';
     }
+
     function setHidden(edge) {
         btn.classList.add('nc-hidden-edge');
         isHidden = true;
         hiddenEdge = edge;
     }
+
     function savePosition() {
         let fullLeft, fullTop;
         if (isHidden) {
@@ -378,11 +391,13 @@
         GM_setValue(STORAGE_KEYS.BTN_HIDDEN, isHidden);
         GM_setValue(STORAGE_KEYS.BTN_EDGE, hiddenEdge);
     }
+
     function loadPosition() {
         const savedLeft = GM_getValue(STORAGE_KEYS.BTN_LEFT, null);
         const savedTop = GM_getValue(STORAGE_KEYS.BTN_TOP, null);
         const savedHidden = GM_getValue(STORAGE_KEYS.BTN_HIDDEN, false);
         const savedEdge = GM_getValue(STORAGE_KEYS.BTN_EDGE, '');
+
         if (savedLeft !== null && savedTop !== null) {
             const clamped = clampFullPos(savedLeft, savedTop);
             if (savedHidden && savedEdge) {
@@ -395,6 +410,7 @@
             }
         }
     }
+
     function snapToEdge(left, top) {
         const winW = innerWidth, winH = innerHeight;
         let edge = '';
@@ -402,6 +418,7 @@
         else if (left + BTN_SIZE > winW - SNAP_THRESHOLD) edge = 'right';
         else if (top < SNAP_THRESHOLD) edge = 'top';
         else if (top + BTN_SIZE > winH - SNAP_THRESHOLD) edge = 'bottom';
+
         if (edge) {
             const hiddenPos = getHiddenPos(edge, left, top);
             applyPosition(hiddenPos.left, hiddenPos.top);
@@ -423,6 +440,7 @@
             setFullVisible();
         }
     });
+
     btn.addEventListener('mouseleave', () => {
         if (isDragging) return;
         if (!isHidden) {
@@ -430,6 +448,7 @@
             snapToEdge(rect.left, rect.top);
         }
     });
+
     btn.addEventListener('mousedown', (e) => {
         if (e.button === 2) return;
         e.preventDefault();
@@ -450,6 +469,7 @@
         document.addEventListener('mousemove', onDragMove, true);
         document.addEventListener('mouseup', onDragEnd, true);
     });
+
     function onDragMove(e) {
         if (!isDragging) return;
         e.preventDefault();
@@ -462,6 +482,7 @@
         newTop = Math.max(-BTN_SIZE + 8, Math.min(newTop, winH - 8));
         applyPosition(newLeft, newTop);
     }
+
     function onDragEnd(e) {
         if (!isDragging) return;
         document.removeEventListener('mousemove', onDragMove, true);
@@ -474,6 +495,7 @@
         lastDragDist = Math.sqrt(dx*dx + dy*dy);
         snapToEdge(rect.left, rect.top);
     }
+
     btn.addEventListener('click', (e) => {
         if (lastDragDist > 4) {
             e.preventDefault();
@@ -496,11 +518,13 @@
         triggerClipper();
         lastDragDist = 0;
     });
+
     btn.addEventListener('contextmenu', e => {
         e.preventDefault();
         e.stopPropagation();
         openSettings();
     });
+
     window.addEventListener('resize', () => {
         if (isHidden) {
             const savedLeft = GM_getValue(STORAGE_KEYS.BTN_LEFT, null);
@@ -517,11 +541,12 @@
         }
     });
 
-    // ==================== 大图检测 ====================
+    // ==================== 大图检测，自动隐藏按钮 ====================
     function isLargeImage(img) {
         const rect = img.getBoundingClientRect();
         return rect.width >= innerWidth * LARGE_IMG_THRESHOLD || rect.height >= innerHeight * LARGE_IMG_THRESHOLD;
     }
+
     document.addEventListener('mousemove', function(e) {
         if (isDragging || isSelecting) return;
         const target = document.elementFromPoint(e.clientX, e.clientY);
@@ -567,6 +592,7 @@
         }
         return null;
     }
+
     function isAvatar(img) {
         if (!img) return true;
         const src = img.src || img.getAttribute('data-src') || '';
@@ -584,6 +610,7 @@
         if (/_(is|xs|s)\.(jpg|jpeg|png|webp)/i.test(src)) return true;
         return false;
     }
+
     function isZhihuMemberImage(img) {
         if (!isZhihu) return false;
         const className = (img.className || '').toLowerCase();
@@ -600,6 +627,7 @@
         }
         return false;
     }
+
     function getVideoURL(videoEl) {
         if (!videoEl) return null;
         if (videoEl.src && !videoEl.src.startsWith('blob:')) return videoEl.src;
@@ -607,9 +635,11 @@
         for (const src of sources) if (src.src) return src.src;
         return null;
     }
+
     function getIframeEmbedURL(iframe) {
         return iframe && iframe.src ? iframe.src : null;
     }
+
     function getGifPlayerMediaURL(container) {
         const video = container.querySelector('video');
         if (video) {
@@ -626,6 +656,7 @@
         }
         return null;
     }
+
     function getPageMainImage() {
         const og = document.querySelector('meta[property="og:image"]');
         if (og?.content) return og.content;
@@ -633,18 +664,22 @@
         if (tw?.content) return tw.content;
         return '';
     }
+
     function getPageIcon() {
         if (cachedPageIcon !== null) return cachedPageIcon;
         const icons = document.querySelectorAll('link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"], link[rel="mask-icon"], link[rel="icon"], link[rel="shortcut icon"]');
         let bestHref = '';
         let bestSize = 0;
+
         for (const link of icons) {
             const href = link.href;
             if (!href || href.startsWith('data:')) continue;
+
             if (link.type === 'image/svg+xml' || href.endsWith('.svg')) {
                 cachedPageIcon = href;
                 return href;
             }
+
             const sizes = link.getAttribute('sizes');
             if (sizes) {
                 const parts = sizes.trim().split(/\s+/);
@@ -652,7 +687,10 @@
                     const match = part.match(/^(\d+)x(\d+)$/i);
                     if (match) {
                         const area = parseInt(match[1]) * parseInt(match[2]);
-                        if (area > bestSize) { bestSize = area; bestHref = href; }
+                        if (area > bestSize) {
+                            bestSize = area;
+                            bestHref = href;
+                        }
                     } else if (part.toLowerCase() === 'any') {
                         cachedPageIcon = href;
                         return href;
@@ -660,13 +698,24 @@
                 }
             } else {
                 if (link.rel === 'apple-touch-icon' || link.rel === 'apple-touch-icon-precomposed') {
-                    if (180 * 180 > bestSize) { bestSize = 180 * 180; bestHref = href; }
+                    if (180 * 180 > bestSize) {
+                        bestSize = 180 * 180;
+                        bestHref = href;
+                    }
                 } else {
-                    if (16 * 16 > bestSize) { bestSize = 16 * 16; bestHref = href; }
+                    if (16 * 16 > bestSize) {
+                        bestSize = 16 * 16;
+                        bestHref = href;
+                    }
                 }
             }
         }
-        if (bestHref) { cachedPageIcon = bestHref; return bestHref; }
+
+        if (bestHref) {
+            cachedPageIcon = bestHref;
+            return bestHref;
+        }
+
         cachedPageIcon = origin + '/favicon.ico';
         return cachedPageIcon;
     }
@@ -676,67 +725,82 @@
         const safeText = text.length > NOTION_TEXT_MAX_LEN - 10 ? text.substring(0, NOTION_TEXT_MAX_LEN - 10) + '...' : text;
         return { object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: safeText } }] } };
     }
-    function buildRichTextBlock(richTextArray, annotations) {
-        try {
-            let totalLen = 0;
-            const truncated = [];
-            for (const item of richTextArray) {
-                if (totalLen >= NOTION_TEXT_MAX_LEN) break;
-                let content = item.text.content;
-                if (totalLen + content.length > NOTION_TEXT_MAX_LEN) {
-                    content = content.substring(0, NOTION_TEXT_MAX_LEN - totalLen) + '...';
-                }
-                totalLen += content.length;
-                const element = {
-                    type: "text",
-                    text: {
-                        content: content,
-                        link: item.text.link || undefined
-                    }
-                };
-                if (annotations) element.annotations = annotations;
-                truncated.push(element);
+
+    function buildRichTextBlock(richTextArray) {
+        let totalLen = 0;
+        const truncated = [];
+        for (const item of richTextArray) {
+            if (totalLen >= NOTION_TEXT_MAX_LEN) break;
+            let content = item.text.content;
+            if (totalLen + content.length > NOTION_TEXT_MAX_LEN) {
+                content = content.substring(0, NOTION_TEXT_MAX_LEN - totalLen) + '...';
             }
-            return { object: "block", type: "paragraph", paragraph: { rich_text: truncated } };
-        } catch (e) {
-            console.warn('构建富文本块失败', e);
-            return buildTextBlock(richTextArray.map(i => i.text.content).join(''));
+            totalLen += content.length;
+            const element = {
+                type: "text",
+                text: {
+                    content: content,
+                    link: item.text.link || undefined
+                }
+            };
+            if (item.annotations) element.annotations = item.annotations;
+            truncated.push(element);
         }
+        return { object: "block", type: "paragraph", paragraph: { rich_text: truncated } };
     }
+
     function buildHeadingBlock(level, text) {
         const type = `heading_${level}`;
         return { object: "block", type, [type]: { rich_text: [{ type: "text", text: { content: text } }] } };
     }
+
     function buildBulletBlock(text) {
         return { object: "block", type: "bulleted_list_item", bulleted_list_item: { rich_text: [{ type: "text", text: { content: text } }] } };
     }
+
     function buildNumberedBlock(text) {
         return { object: "block", type: "numbered_list_item", numbered_list_item: { rich_text: [{ type: "text", text: { content: text } }] } };
     }
+
     function buildQuoteBlock(text) {
         return { object: "block", type: "quote", quote: { rich_text: [{ type: "text", text: { content: text } }] } };
     }
+
     function buildCodeBlock(text, language) {
-        const code = { object: "block", type: "code", code: { rich_text: [{ type: "text", text: { content: text } }] } };
-        if (language) code.code.language = language;
-        return code;
+        const lang = language || 'plain text';
+        return { object: "block", type: "code", code: { rich_text: [{ type: "text", text: { content: text } }], language: lang } };
     }
+
     function buildImageBlock(url) {
         return { object: "block", type: "image", image: { type: "external", external: { url } } };
     }
+
     function buildVideoBlock(url) {
         return { object: "block", type: "video", video: { type: "external", external: { url } } };
     }
+
     function buildEmbedBlock(url) {
         return { object: "block", type: "embed", embed: { url } };
     }
+
+    // 🔧 修复：强制 cells 为数组，并限制列数
     function buildTableBlock(rows, hasHeader) {
-        const tableRows = rows.map((row, idx) => {
-            const cells = row.slice(0, 5).map(cell => ({ type: "text", text: { content: cell } }));
+        const safeRows = rows.filter(r => Array.isArray(r));
+        const tableRows = safeRows.map(row => {
+            const cells = row.slice(0, 5).map(cell => [{ type: "text", text: { content: String(cell || '') } }]);
             return { type: "table_row", table_row: { cells } };
         });
-        return { object: "block", type: "table", table: { table_width: Math.min(rows[0]?.length || 1, 5), has_column_header: hasHeader, children: tableRows } };
+        return {
+            object: "block",
+            type: "table",
+            table: {
+                table_width: Math.min(safeRows[0]?.length || 1, 5),
+                has_column_header: hasHeader,
+                children: tableRows
+            }
+        };
     }
+
     function buildToggleBlock(summary, children) {
         return { object: "block", type: "toggle", toggle: { rich_text: [{ type: "text", text: { content: summary } }], children: children } };
     }
@@ -750,7 +814,6 @@
         return clone;
     }
 
-    // 提取知乎作者名称
     function getZhihuAuthorName(element) {
         const authorSelectors = [
             '.UserLink', '.AuthorInfo-name', '.AnswerItem-authorInfo .UserLink',
@@ -770,7 +833,7 @@
     // ==================== 内容解析 ====================
     function parseFragmentToBlocks(fragment) {
         const blocks = [];
-        let currentFragments = [];
+        let currentFragments = []; // { text, link, annotations }
 
         const flushFragments = () => {
             if (currentFragments.length === 0) return;
@@ -842,6 +905,7 @@
                     return;
                 }
 
+                // 表格增强
                 if (tag === 'TABLE') {
                     flushFragments();
                     const rows = [];
@@ -890,7 +954,10 @@
                     return;
                 }
 
-                if (tag === 'BR') { currentFragments.push({ text: '\n', link: null, annotations: parentAnnotations }); return; }
+                if (tag === 'BR') {
+                    currentFragments.push({ text: '\n', link: null, annotations: parentAnnotations });
+                    return;
+                }
 
                 if (tag === 'IMG') {
                     if (!isAvatar(node) && !isZhihuMemberImage(node)) {
@@ -900,8 +967,18 @@
                     }
                     return;
                 }
-                if (tag === 'VIDEO') { flushFragments(); const url = getVideoURL(node); if (url) blocks.push(buildVideoBlock(url)); return; }
-                if (tag === 'IFRAME') { flushFragments(); const url = getIframeEmbedURL(node); if (url) blocks.push(buildEmbedBlock(url)); return; }
+                if (tag === 'VIDEO') {
+                    flushFragments();
+                    const url = getVideoURL(node);
+                    if (url) blocks.push(buildVideoBlock(url));
+                    return;
+                }
+                if (tag === 'IFRAME') {
+                    flushFragments();
+                    const url = getIframeEmbedURL(node);
+                    if (url) blocks.push(buildEmbedBlock(url));
+                    return;
+                }
 
                 if (/^H[1-6]$/.test(tag)) {
                     flushFragments();
@@ -924,17 +1001,29 @@
                     if (text) blocks.push(buildQuoteBlock(text));
                     return;
                 }
-                if (tag === 'PRE' || (tag === 'DIV' && node.querySelector('pre'))) {
+                // 代码块解析（仅匹配纯代码容器，避免把含代码的回答整体当成代码块）
+                if (tag === 'PRE') {
                     flushFragments();
-                    const pre = tag === 'PRE' ? node : node.querySelector('pre');
+                    const codeText = node.textContent || '';
+                    const language = node.getAttribute('data-language') || 'plain text';
+                    blocks.push(buildCodeBlock(codeText, language));
+                    return;
+                }
+                if (tag === 'DIV' && node.querySelector('pre') && !node.querySelector('p, h1, h2, h3, h4, h5, h6, blockquote, ul, ol, details, article, section')) {
+                    flushFragments();
+                    const pre = node.querySelector('pre');
                     if (pre) {
                         const codeText = pre.textContent || '';
-                        const language = pre.getAttribute('data-language') || '';
+                        const language = pre.getAttribute('data-language') || 'plain text';
                         blocks.push(buildCodeBlock(codeText, language));
                     }
                     return;
                 }
-                if (tag === 'FIGURE') { flushFragments(); node.childNodes.forEach(c => walk(c, parentAnnotations)); return; }
+                if (tag === 'FIGURE') {
+                    flushFragments();
+                    node.childNodes.forEach(c => walk(c, parentAnnotations));
+                    return;
+                }
 
                 if (BLOCK_TAGS.has(tag)) {
                     flushFragments();
@@ -961,8 +1050,8 @@
     // ==================== Twitter 对话提取 ====================
     function extractTwitterConversationBlocks() {
         if (!isTwitterStatus) return null;
-        const main = document.querySelector('main[role="main"]') || document.querySelector('div[data-testid="primaryColumn"]') || document.body;
-        const tweets = main.querySelectorAll('article[data-testid="tweet"]');
+        const mainContainer = document.querySelector('main[role="main"]') || document.querySelector('div[data-testid="primaryColumn"]') || document.body;
+        const tweets = mainContainer.querySelectorAll('article[data-testid="tweet"]');
         if (tweets.length < 2) return null;
         const allBlocks = [];
         for (let i = 0; i < tweets.length; i++) {
@@ -1008,19 +1097,16 @@
         const fragment = document.createDocumentFragment();
         fragment.appendChild(clone);
         let blocks = parseFragmentToBlocks(fragment);
-
-        // 知乎：提取作者并前置
         if (isZhihu) {
             const author = getZhihuAuthorName(el);
             if (author) {
-                const authorBlock = buildTextBlock(`作者：${author}`);
-                blocks = [authorBlock, ...blocks];
+                blocks = [buildTextBlock(`作者：${author}`), ...blocks];
             }
         }
         return blocks;
     }
 
-    // ==================== 平台判断 ====================
+    // ==================== 平台判断与目标查找 ====================
     const isZhihu = location.hostname.includes('zhihu.com');
     const isTwitter = location.hostname.includes('x.com') || location.hostname.includes('twitter.com');
     const isTwitterStatus = isTwitter && location.pathname.includes('/status/');
@@ -1028,14 +1114,15 @@
     function findBestTarget(element) {
         if (!element || element === document.body || element === document.documentElement) return null;
         if (isOurUI(element)) return null;
+
         if (element.tagName === 'IMG') return (!isAvatar(element) && !isZhihuMemberImage(element) && getRealImageURL(element)) ? element : null;
         if (element.tagName === 'VIDEO' && getVideoURL(element)) return element;
         if (element.tagName === 'IFRAME' && getIframeEmbedURL(element)) return element;
         if (element.classList?.contains('GifPlayer')) return element;
 
         if (isZhihu) {
-            const selectors = ['.AnswerItem','.PostIndex-answerItem','.List-item','.QuestionAnswer-content','[itemprop="suggestedAnswer"]','.ContentItem','.Card','.RichContent','.RichContent-inner'];
-            for (const sel of selectors) {
+            const answerSelectors = ['.AnswerItem','.PostIndex-answerItem','.List-item','.QuestionAnswer-content','[itemprop="suggestedAnswer"]','.ContentItem','.Card','.RichContent','.RichContent-inner','.Answer','.Post-RichTextContainer','[itemprop="text"]','.RichText','article'];
+            for (const sel of answerSelectors) {
                 const card = element.closest(sel);
                 if (card) {
                     const rect = card.getBoundingClientRect();
@@ -1043,18 +1130,30 @@
                 }
             }
         }
+
         if (isTwitter) {
             const tweet = element.closest('article[data-testid="tweet"]');
             if (tweet) return tweet;
         }
-        for (const tag of BLOCK_TAGS) {
-            const el = element.closest(tag);
-            if (el) {
-                const rect = el.getBoundingClientRect();
-                if (rect.width > 20 && rect.height > 20) return el;
+
+        const blockTags = ['P','DIV','SECTION','ARTICLE','LI','BLOCKQUOTE','H1','H2','H3','H4','H5','H6','PRE','TABLE','ASIDE','MAIN','HEADER','FOOTER'];
+        let current = element;
+        let leafBlock = null;
+        while (current && current !== document.body && current !== document.documentElement) {
+            const tag = current.tagName;
+            if (blockTags.includes(tag)) {
+                const rect = current.getBoundingClientRect();
+                if (rect.width > 20 && rect.height > 20) {
+                    if (LEAF_BLOCK_TAGS.has(tag)) {
+                        leafBlock = current;
+                    } else {
+                        return current;
+                    }
+                }
             }
+            current = current.parentElement;
         }
-        return element.closest('p, div, li, blockquote') || null;
+        return leafBlock || element.closest('p, div, li, blockquote') || null;
     }
 
     // ==================== 事件处理 ====================
@@ -1077,6 +1176,7 @@
             } else { removeHighlight(); }
         });
     }
+
     function handleClick(e) {
         if (!isSelecting) return;
         if (isOurUI(e.target)) return;
@@ -1092,15 +1192,21 @@
         e.preventDefault();
         e.stopPropagation();
     }
+
     function handleEsc(e) {
         if (e.key === 'Escape') {
             e.preventDefault();
             if (isSelecting) stopSelectMode();
         }
     }
+
     function onConfirmKeydown(e) {
         if (!isConfirmOpen) return;
-        if (e.key === 'Escape') { e.preventDefault(); closeConfirmModal(); return; }
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeConfirmModal();
+            return;
+        }
         if (e.ctrlKey && e.key === 'a') {
             const active = shadow.activeElement || document.activeElement;
             if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
@@ -1113,12 +1219,15 @@
             sel.addRange(range);
         }
     }
+
     function closeConfirmModal() {
         confirmOverlay.style.display = 'none';
         isConfirmOpen = false;
         document.removeEventListener('keydown', onConfirmKeydown, true);
     }
+
     function removeHighlight() { highlightOverlay.style.display = 'none'; highlightedEl = null; }
+
     function startSelectMode() {
         if (isSelecting) stopSelectMode();
         isSelecting = true;
@@ -1127,6 +1236,7 @@
         document.addEventListener('click', handleClick, true);
         document.addEventListener('keydown', handleEsc, true);
     }
+
     function stopSelectMode() {
         if (!isSelecting) return;
         isSelecting = false;
@@ -1143,11 +1253,13 @@
         const wrapper = document.createElement('div');
         wrapper.className = 'nc-preview-item';
         wrapper.dataset.index = index;
+
         const delBtn = document.createElement('button');
         delBtn.className = 'nc-preview-delete';
         delBtn.textContent = '❌';
         delBtn.title = '删除此块';
         wrapper.appendChild(delBtn);
+
         let content;
         if (block.type === 'paragraph') {
             const p = document.createElement('p');
@@ -1210,9 +1322,12 @@
             if (block.table?.children) {
                 block.table.children.forEach(row => {
                     const tr = document.createElement('tr');
-                    row.table_row?.cells?.forEach(cell => {
+                    row.table_row?.cells?.forEach(cellArr => {
                         const td = document.createElement('td');
-                        td.textContent = cell.text?.content || '';
+                        const text = Array.isArray(cellArr)
+                            ? cellArr.map(rt => rt.text?.content || '').join('')
+                            : (cellArr?.text?.content || '');
+                        td.textContent = text;
                         td.style.border = '1px solid #ccc';
                         td.style.padding = '4px';
                         tr.appendChild(td);
@@ -1242,7 +1357,10 @@
 
     function refreshPreview() {
         previewBox.innerHTML = '';
-        if (currentNotionBlocks.length === 0) { previewBox.textContent = '无内容'; return; }
+        if (currentNotionBlocks.length === 0) {
+            previewBox.textContent = '无内容';
+            return;
+        }
         currentNotionBlocks.forEach((block, idx) => renderBlockToPreview(block, previewBox, idx));
     }
 
@@ -1268,6 +1386,7 @@
         isConfirmOpen = true;
         document.addEventListener('keydown', onConfirmKeydown, true);
     }
+
     function openSettings() {
         tokenInput.value = GM_getValue(STORAGE_KEYS.TOKEN, '');
         dbIdInput.value = GM_getValue(STORAGE_KEYS.DB_ID, '');
@@ -1277,6 +1396,7 @@
         tokenToggle.textContent = '👁️';
         settingsOverlay.style.display = 'flex';
     }
+
     function triggerClipper() {
         if (!GM_getValue(STORAGE_KEYS.TOKEN) || !GM_getValue(STORAGE_KEYS.DB_ID)) {
             showToast('请先右键点击 ✂️ 按钮进行 Notion 配置！', 'error');
@@ -1285,6 +1405,7 @@
         }
         startSelectMode();
     }
+
     function showSuccessModal(pageId) {
         lastCreatedPageId = pageId;
         successOverlay.style.display = 'flex';
@@ -1347,6 +1468,7 @@
         try {
             const dbInfo = await notionRequest('GET', `https://api.notion.com/v1/databases/${dbId}`);
             let dbProps = dbInfo.properties;
+
             if (tagsPropName && tags.length > 0 && !dbProps[tagsPropName]) {
                 try {
                     await notionRequest('PATCH', `https://api.notion.com/v1/databases/${dbId}`, {
@@ -1355,6 +1477,7 @@
                     dbProps[tagsPropName] = { type: 'multi_select' };
                 } catch (e) { console.warn('自动创建标签失败', e); }
             }
+
             let titleProp = 'Name';
             for (const key in dbProps) if (dbProps[key].type === 'title') { titleProp = key; break; }
             const properties = { [titleProp]: { title: [{ text: { content: title.substring(0, 200) } }] } };
@@ -1372,16 +1495,21 @@
                 const icon = getPageIcon();
                 if (icon) properties['Icon'] = { url: icon };
             }
+
             const children = currentNotionBlocks;
             const firstBatch = children.length <= NOTION_BATCH_SIZE ? children : children.slice(0, NOTION_BATCH_SIZE);
             const data = { parent: { database_id: dbId }, properties, children: firstBatch };
+
             const iconUrl = getPageIcon();
             if (iconUrl) data.icon = { type: 'external', external: { url: iconUrl } };
+
             const response = await notionRequest('POST', 'https://api.notion.com/v1/pages', data);
             const pageId = response.id;
+
             if (children.length > NOTION_BATCH_SIZE) {
                 await appendBlocks(pageId, children.slice(NOTION_BATCH_SIZE));
             }
+
             closeConfirmModal();
             showSuccessModal(pageId);
         } catch (error) {
@@ -1412,7 +1540,7 @@
         window.open(`https://www.notion.so/${lastCreatedPageId.replace(/-/g, '')}`, '_blank');
     });
     successCloseBtn.addEventListener('click', () => successOverlay.style.display = 'none');
-    successOverlay.addEventListener('click', e => { if (e.target === successOverlay) successOverlay.style.display = 'none'; });
+    successOverlay.addEventListener('click', (e) => { if (e.target === successOverlay) successOverlay.style.display = 'none'; });
 
     // ==================== 初始化 ====================
     loadPosition();
