@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      2.1.3
-// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。修复表格块 cells 必须为数组的问题。
+// @version      2.2.3
+// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。修复表格块 cells 必须为数组的问题。兼容"网页限制解除"等脚本。
 // @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -22,8 +22,12 @@
     // 防 iframe 重复
     if (window.self !== window.top) return;
 
-    const oldHost = document.getElementById('nc-host');
-    if (oldHost) oldHost.remove();
+
+
+    // ==================== 初始化 ====================
+    function ncInit() {
+        const oldHost = document.getElementById('nc-host');
+        if (oldHost) oldHost.remove();
 
     const host = document.createElement('div');
     host.id = 'nc-host';
@@ -300,6 +304,54 @@
 
     function isOurUI(el) { return el === host; }
 
+    // ==================== Document 级事件分发器 ====================
+    // "网页限制解除"等脚本会 hook EventTarget.prototype.addEventListener，
+    // 将 mousemove/contextmenu 的 handler 替换为 returnTrue 使其失效。
+    // 使用 on* 属性赋值注册事件，完全绕过 addEventListener hook。
+    // 保留页面已有的 on* handler 以避免破坏原站功能。
+    const _prevOnMM = document.onmousemove;
+    const _prevOnMU = document.onmouseup;
+
+    document.onmousemove = function(e) {
+        if (_prevOnMM) _prevOnMM.call(this, e);
+        // 大图检测（非拖拽/非选取时）
+        if (!isDragging && !isSelecting) {
+            const _t = document.elementFromPoint(e.clientX, e.clientY);
+            if (_t && _t.tagName === 'IMG' && isLargeImage(_t)) {
+                if (!isHiddenForLargeImage) { isHiddenForLargeImage = true; btn.style.display = 'none'; }
+            } else if (isHiddenForLargeImage) {
+                isHiddenForLargeImage = false;
+                btn.style.display = '';
+                if (isHidden) {
+                    const sL = GM_getValue(STORAGE_KEYS.BTN_LEFT, null);
+                    const sT = GM_getValue(STORAGE_KEYS.BTN_TOP, null);
+                    if (sL !== null && sT !== null) {
+                        const p = getHiddenPos(hiddenEdge, sL, sT);
+                        applyPosition(p.left, p.top);
+                        setHidden(hiddenEdge);
+                    }
+                } else { loadPosition(); }
+            }
+        }
+        // 拖拽移动
+        if (isDragging) {
+            e.preventDefault();
+            const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
+            let nL = initialLeft + dx, nT = initialTop + dy;
+            nL = Math.max(-BTN_SIZE + 8, Math.min(nL, innerWidth - 8));
+            nT = Math.max(-BTN_SIZE + 8, Math.min(nT, innerHeight - 8));
+            applyPosition(nL, nT);
+        }
+        // 选取模式高亮
+        if (isSelecting) { handleMouseMove(e); }
+    };
+
+    document.onmouseup = function(e) {
+        if (_prevOnMU) _prevOnMU.call(this, e);
+        if (isDragging) onDragEnd(e);
+    };
+
+
     // ==================== Toast 通知 ====================
     function showToast(message, type = 'success') {
         const toast = document.createElement('div');
@@ -466,27 +518,10 @@
         dragStartY = e.clientY;
         initialLeft = rect.left;
         initialTop = rect.top;
-        document.addEventListener('mousemove', onDragMove, true);
-        document.addEventListener('mouseup', onDragEnd, true);
     });
-
-    function onDragMove(e) {
-        if (!isDragging) return;
-        e.preventDefault();
-        const dx = e.clientX - dragStartX;
-        const dy = e.clientY - dragStartY;
-        let newLeft = initialLeft + dx;
-        let newTop = initialTop + dy;
-        const winW = innerWidth, winH = innerHeight;
-        newLeft = Math.max(-BTN_SIZE + 8, Math.min(newLeft, winW - 8));
-        newTop = Math.max(-BTN_SIZE + 8, Math.min(newTop, winH - 8));
-        applyPosition(newLeft, newTop);
-    }
 
     function onDragEnd(e) {
         if (!isDragging) return;
-        document.removeEventListener('mousemove', onDragMove, true);
-        document.removeEventListener('mouseup', onDragEnd, true);
         isDragging = false;
         btn.style.transition = 'left 0.25s ease, top 0.25s ease, opacity 0.2s ease';
         const rect = btn.getBoundingClientRect();
@@ -519,11 +554,11 @@
         lastDragDist = 0;
     });
 
-    btn.addEventListener('contextmenu', e => {
+    btn.oncontextmenu = function(e) {
         e.preventDefault();
         e.stopPropagation();
         openSettings();
-    });
+    };
 
     window.addEventListener('resize', () => {
         if (isHidden) {
@@ -547,32 +582,7 @@
         return rect.width >= innerWidth * LARGE_IMG_THRESHOLD || rect.height >= innerHeight * LARGE_IMG_THRESHOLD;
     }
 
-    document.addEventListener('mousemove', function(e) {
-        if (isDragging || isSelecting) return;
-        const target = document.elementFromPoint(e.clientX, e.clientY);
-        if (target && target.tagName === 'IMG' && isLargeImage(target)) {
-            if (!isHiddenForLargeImage) {
-                isHiddenForLargeImage = true;
-                btn.style.display = 'none';
-            }
-        } else {
-            if (isHiddenForLargeImage) {
-                isHiddenForLargeImage = false;
-                btn.style.display = '';
-                if (isHidden) {
-                    const savedLeft = GM_getValue(STORAGE_KEYS.BTN_LEFT, null);
-                    const savedTop = GM_getValue(STORAGE_KEYS.BTN_TOP, null);
-                    if (savedLeft !== null && savedTop !== null) {
-                        const pos = getHiddenPos(hiddenEdge, savedLeft, savedTop);
-                        applyPosition(pos.left, pos.top);
-                        setHidden(hiddenEdge);
-                    }
-                } else {
-                    loadPosition();
-                }
-            }
-        }
-    }, true);
+
 
     // ==================== 媒体辅助函数 ====================
     function getRealImageURL(img) {
@@ -1232,7 +1242,7 @@
         if (isSelecting) stopSelectMode();
         isSelecting = true;
         selectTip.style.display = 'block';
-        document.addEventListener('mousemove', handleMouseMove, true);
+        // mousemove 由 document.onmousemove 分发器处理（绕过 addEventListener hook）
         document.addEventListener('click', handleClick, true);
         document.addEventListener('keydown', handleEsc, true);
     }
@@ -1243,7 +1253,7 @@
         selectTip.style.display = 'none';
         removeHighlight();
         if (rafId) cancelAnimationFrame(rafId);
-        document.removeEventListener('mousemove', handleMouseMove, true);
+        // mousemove 由 onmousemove 分发器通过 isSelecting 标志控制，无需移除
         document.removeEventListener('click', handleClick, true);
         document.removeEventListener('keydown', handleEsc, true);
     }
@@ -1544,4 +1554,7 @@
 
     // ==================== 初始化 ====================
     loadPosition();
+    }
+
+    ncInit();
 })();
