@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      2.2.3
-// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。修复表格块 cells 必须为数组的问题。兼容"网页限制解除"等脚本。
+// @version      2.2.4
+// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。修复表格块 cells 必须为数组的问题。彻底免疫"网页限制解除"等 addEventListener hook 脚本。
 // @author       yuhaung
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -106,6 +106,10 @@
             pointer-events:none; display:none;
             transition: all 0.1s ease;
         }
+        .nc-select-mask {
+            position:fixed; top:0; left:0; width:100%; height:100%;
+            z-index:-1; display:none; cursor:crosshair;
+        }
         .nc-overlay {
             position:fixed; top:0; left:0; width:100%; height:100%;
             background:rgba(0,0,0,0.6); display:none;
@@ -208,6 +212,7 @@
     uiContainer.innerHTML = `
         <button class="nc-clipper-btn" title="左键选取 / 右键设置">✂️</button>
         <div class="nc-select-tip">🔍 悬停高亮元素，单击提取内容 (Esc取消)</div>
+        <div class="nc-select-mask"></div>
         <div class="nc-highlight-overlay"></div>
 
         <div class="nc-overlay" id="nc-settings-overlay">
@@ -264,6 +269,7 @@
     // ==================== DOM 引用 ====================
     const btn = $('.nc-clipper-btn');
     const selectTip = $('.nc-select-tip');
+    const selectMask = $('.nc-select-mask');
     const highlightOverlay = $('.nc-highlight-overlay');
     const settingsOverlay = $('#nc-settings-overlay');
     const confirmOverlay = $('#nc-confirm-overlay');
@@ -306,34 +312,17 @@
 
     // ==================== Document 级事件分发器 ====================
     // "网页限制解除"等脚本会 hook EventTarget.prototype.addEventListener，
-    // 将 mousemove/contextmenu 的 handler 替换为 returnTrue 使其失效。
+    // 将 mousemove/click/contextmenu 的 handler 替换为 returnTrue 使其失效。
     // 使用 on* 属性赋值注册事件，完全绕过 addEventListener hook。
     // 保留页面已有的 on* handler 以避免破坏原站功能。
     const _prevOnMM = document.onmousemove;
     const _prevOnMU = document.onmouseup;
+    let _largeImgCheckTs = 0; // 大图检测节流时间戳
+    const LARGE_IMG_CHECK_INTERVAL = 200; // 大图检测节流间隔(ms)
 
     document.onmousemove = function(e) {
         if (_prevOnMM) _prevOnMM.call(this, e);
-        // 大图检测（非拖拽/非选取时）
-        if (!isDragging && !isSelecting) {
-            const _t = document.elementFromPoint(e.clientX, e.clientY);
-            if (_t && _t.tagName === 'IMG' && isLargeImage(_t)) {
-                if (!isHiddenForLargeImage) { isHiddenForLargeImage = true; btn.style.display = 'none'; }
-            } else if (isHiddenForLargeImage) {
-                isHiddenForLargeImage = false;
-                btn.style.display = '';
-                if (isHidden) {
-                    const sL = GM_getValue(STORAGE_KEYS.BTN_LEFT, null);
-                    const sT = GM_getValue(STORAGE_KEYS.BTN_TOP, null);
-                    if (sL !== null && sT !== null) {
-                        const p = getHiddenPos(hiddenEdge, sL, sT);
-                        applyPosition(p.left, p.top);
-                        setHidden(hiddenEdge);
-                    }
-                } else { loadPosition(); }
-            }
-        }
-        // 拖拽移动
+        // 拖拽移动（高优先级，无节流）
         if (isDragging) {
             e.preventDefault();
             const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
@@ -341,15 +330,38 @@
             nL = Math.max(-BTN_SIZE + 8, Math.min(nL, innerWidth - 8));
             nT = Math.max(-BTN_SIZE + 8, Math.min(nT, innerHeight - 8));
             applyPosition(nL, nT);
+            return; // 拖拽中跳过大图检测
         }
-        // 选取模式高亮
-        if (isSelecting) { handleMouseMove(e); }
+        // 选取模式高亮（由 handleMouseMove 内部 RAF 节流）
+        if (isSelecting) { handleMouseMove(e); return; }
+        // 大图检测（节流：200ms 间隔，避免每帧 elementFromPoint + getBoundingClientRect）
+        const now = Date.now();
+        if (now - _largeImgCheckTs < LARGE_IMG_CHECK_INTERVAL) return;
+        _largeImgCheckTs = now;
+        const _t = document.elementFromPoint(e.clientX, e.clientY);
+        if (_t && _t.tagName === 'IMG' && isLargeImage(_t)) {
+            if (!isHiddenForLargeImage) { isHiddenForLargeImage = true; btn.style.display = 'none'; }
+        } else if (isHiddenForLargeImage) {
+            isHiddenForLargeImage = false;
+            btn.style.display = '';
+            if (isHidden) {
+                const sL = GM_getValue(STORAGE_KEYS.BTN_LEFT, null);
+                const sT = GM_getValue(STORAGE_KEYS.BTN_TOP, null);
+                if (sL !== null && sT !== null) {
+                    const p = getHiddenPos(hiddenEdge, sL, sT);
+                    applyPosition(p.left, p.top);
+                    setHidden(hiddenEdge);
+                }
+            } else { loadPosition(); }
+        }
     };
 
     document.onmouseup = function(e) {
         if (_prevOnMU) _prevOnMU.call(this, e);
         if (isDragging) onDragEnd(e);
     };
+
+    // 选取模式的点击由 selectMask.onclick 处理（目标阶段，可阻止链接跳转）
 
 
     // ==================== Toast 通知 ====================
@@ -1057,6 +1069,66 @@
         });
     }
 
+    // ==================== Twitter 媒体提取 ====================
+    // Twitter 图片 URL 质量升级：name=small/medium → name=large/orig
+    function upgradeTwitterImageURL(url) {
+        if (!url) return url;
+        return url.replace(/\?format=(\w+)&name=(small|medium|large)/i, '?format=$1&name=orig');
+    }
+
+    // 从推文（原始 DOM，非克隆）提取所有媒体块
+    function extractTwitterMediaBlocks(tweetEl) {
+        const mediaBlocks = [];
+        // 提取图片：data-testid="tweetPhoto" 容器内的 img
+        tweetEl.querySelectorAll('[data-testid="tweetPhoto"]').forEach(photo => {
+            const img = photo.querySelector('img');
+            if (!img) return;
+            // 优先从原始 DOM 的 img.src 获取（已加载的 URL），克隆会丢失
+            let url = img.src || getRealImageURL(img);
+            if (url && !url.startsWith('data:') && !url.includes('placeholder')) {
+                if (url.startsWith('//')) url = 'https:' + url;
+                url = upgradeTwitterImageURL(url);
+                // 排除头像：推特头像通常在 [data-testid="Tweet-User-Avatar"] 内
+                if (!img.closest('[data-testid="Tweet-User-Avatar"]')) {
+                    mediaBlocks.push(buildImageBlock(url));
+                }
+            }
+        });
+        // 提取视频：data-testid="videoPlayer" 容器
+        tweetEl.querySelectorAll('[data-testid="videoPlayer"]').forEach(player => {
+            const video = player.querySelector('video');
+            if (video) {
+                // Twitter 视频通常用 blob: URL，直接不可用，尝试获取 poster 作为图片
+                const poster = video.poster;
+                if (poster && !poster.startsWith('data:')) {
+                    mediaBlocks.push(buildImageBlock(upgradeTwitterImageURL(poster)));
+                }
+                // 尝试从 source 标签获取非 blob URL
+                const sources = player.querySelectorAll('source');
+                for (const s of sources) {
+                    if (s.src && !s.src.startsWith('blob:')) {
+                        mediaBlocks.push(buildVideoBlock(s.src));
+                        return; // 有真实视频 URL 就不再用 poster
+                    }
+                }
+            }
+        });
+        // 兜底：扫描所有未处理的 img（不在 tweetPhoto 容器中的）
+        const allImgs = tweetEl.querySelectorAll('img');
+        const photoImgs = new Set(tweetEl.querySelectorAll('[data-testid="tweetPhoto"] img'));
+        const avatarImgs = new Set(tweetEl.querySelectorAll('[data-testid="Tweet-User-Avatar"] img'));
+        allImgs.forEach(img => {
+            if (photoImgs.has(img) || avatarImgs.has(img)) return;
+            if (isAvatar(img)) return;
+            let url = img.src || getRealImageURL(img);
+            if (url && !url.startsWith('data:') && !url.includes('placeholder')) {
+                if (url.startsWith('//')) url = 'https:' + url;
+                mediaBlocks.push(buildImageBlock(upgradeTwitterImageURL(url)));
+            }
+        });
+        return mediaBlocks;
+    }
+
     // ==================== Twitter 对话提取 ====================
     function extractTwitterConversationBlocks() {
         if (!isTwitterStatus) return null;
@@ -1065,13 +1137,18 @@
         if (tweets.length < 2) return null;
         const allBlocks = [];
         for (let i = 0; i < tweets.length; i++) {
+            // 先从原始 DOM 提取媒体（避免克隆丢失 src）
+            const mediaBlocks = extractTwitterMediaBlocks(tweets[i]);
             const clone = tweets[i].cloneNode(true);
+            // 移除克隆中的 img/video 避免重复提取
+            clone.querySelectorAll('img, video, [data-testid="tweetPhoto"], [data-testid="videoPlayer"]').forEach(n => n.remove());
             const fragment = document.createDocumentFragment();
             fragment.appendChild(clone);
             const tweetBlocks = parseFragmentToBlocks(fragment);
-            if (tweetBlocks.length > 0) {
+            // 合并：先文本，后媒体
+            if (tweetBlocks.length > 0 || mediaBlocks.length > 0) {
                 if (i > 0) allBlocks.push(buildQuoteBlock('---'));
-                allBlocks.push(...tweetBlocks);
+                allBlocks.push(...tweetBlocks, ...mediaBlocks);
             }
         }
         return allBlocks.length > 0 ? allBlocks : null;
@@ -1083,7 +1160,8 @@
 
         if (el.tagName === 'IMG') {
             if (!isAvatar(el) && !isZhihuMemberImage(el)) {
-                const url = getRealImageURL(el);
+                let url = getRealImageURL(el);
+                if (url && isTwitter) url = upgradeTwitterImageURL(url);
                 return url ? [buildImageBlock(url)] : [];
             }
             return [];
@@ -1100,6 +1178,19 @@
             const media = getGifPlayerMediaURL(el);
             if (media) {
                 return [media.type === 'video' ? buildVideoBlock(media.url) : buildImageBlock(media.url)];
+            }
+        }
+        // Twitter 单条推文：先提取媒体，再解析文本
+        if (isTwitter) {
+            const tweetArticle = el.closest('article[data-testid="tweet"]');
+            if (tweetArticle) {
+                const mediaBlocks = extractTwitterMediaBlocks(tweetArticle);
+                const clone = tweetArticle.cloneNode(true);
+                clone.querySelectorAll('img, video, [data-testid="tweetPhoto"], [data-testid="videoPlayer"]').forEach(n => n.remove());
+                const fragment = document.createDocumentFragment();
+                fragment.appendChild(clone);
+                const textBlocks = parseFragmentToBlocks(fragment);
+                return [...textBlocks, ...mediaBlocks];
             }
         }
         const clone = el.cloneNode(true);
@@ -1172,7 +1263,10 @@
         if (!isSelecting) return;
         if (rafId) cancelAnimationFrame(rafId);
         rafId = requestAnimationFrame(() => {
+            // 临时禁用遮罩 pointer-events，使 elementFromPoint 穿透到下方真实元素
+            selectMask.style.pointerEvents = 'none';
             const target = document.elementFromPoint(e.clientX, e.clientY);
+            selectMask.style.pointerEvents = '';
             if (!target || isOurUI(target)) { removeHighlight(); return; }
             const best = findBestTarget(target);
             if (best) {
@@ -1187,11 +1281,14 @@
         });
     }
 
-    function handleClick(e) {
-        if (!isSelecting) return;
-        if (isOurUI(e.target)) return;
+    // selectMask 的 click 通过 onclick 属性注册，在目标阶段触发，
+    // 可以在链接等元素的默认行为之前拦截点击，彻底绕过 addEventListener hook。
+    selectMask.onclick = function(e) {
+        // 临时禁用 pointer-events 使 elementFromPoint 穿透遮罩命中下方真实元素
+        selectMask.style.pointerEvents = 'none';
         const target = document.elementFromPoint(e.clientX, e.clientY);
-        if (!target || isOurUI(target)) return;
+        selectMask.style.pointerEvents = '';
+        if (!target || target === host) return;
         const best = findBestTarget(target);
         if (!best) return;
         const blocks = extractBlocksFromElement(best);
@@ -1201,7 +1298,7 @@
         showConfirmModal(document.title);
         e.preventDefault();
         e.stopPropagation();
-    }
+    };
 
     function handleEsc(e) {
         if (e.key === 'Escape') {
@@ -1242,8 +1339,9 @@
         if (isSelecting) stopSelectMode();
         isSelecting = true;
         selectTip.style.display = 'block';
-        // mousemove 由 document.onmousemove 分发器处理（绕过 addEventListener hook）
-        document.addEventListener('click', handleClick, true);
+        selectMask.style.display = 'block'; // 全屏遮罩拦截点击（绕过 addEventListener hook）
+        document.body.style.cursor = 'crosshair';
+        // mousemove 由 document.onmousemove 分发器处理
         document.addEventListener('keydown', handleEsc, true);
     }
 
@@ -1251,10 +1349,10 @@
         if (!isSelecting) return;
         isSelecting = false;
         selectTip.style.display = 'none';
+        selectMask.style.display = 'none';
+        document.body.style.cursor = '';
         removeHighlight();
         if (rafId) cancelAnimationFrame(rafId);
-        // mousemove 由 onmousemove 分发器通过 isSelecting 标志控制，无需移除
-        document.removeEventListener('click', handleClick, true);
         document.removeEventListener('keydown', handleEsc, true);
     }
 
