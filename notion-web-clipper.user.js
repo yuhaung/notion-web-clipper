@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      2.3.0
-// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。优化版：修复 H4-H6 标题、表格列数不一致、超长文本、非法代码语言导致的 API 报错；网络错误重试；拖拽/点击体验优化。免疫 addEventListener hook 脚本。
+// @version      2.3.1
+// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。优化版：修复 H4-H6 标题、表格列数不一致、超长文本、非法代码语言及非法 URL 导致的 API 报错；网络错误重试；拖拽/点击体验优化。免疫 addEventListener hook 脚本。
 // @author       yuhaung
 // @match        *://*/*
 // @noframes
@@ -622,7 +622,23 @@
             return url;
         }
 
-        const isValidHttpURL = (url) => !!url && url.length <= MAX_URL_LEN && /^https?:\/\//i.test(url);
+        // 严格验证并规范化 URL（用于所有发送给 Notion API 的 URL）
+        // 使用 new URL() 进行结构验证 + 自动编码，确保 Notion API 不会拒绝
+        function sanitizeURL(rawUrl) {
+            if (!rawUrl || typeof rawUrl !== 'string') return null;
+            const url = rawUrl.trim();
+            if (!url || url.length > MAX_URL_LEN) return null;
+            try {
+                const u = new URL(url, location.href);
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+                const normalized = u.href; // new URL() 自动编码空格/非ASCII等
+                return normalized.length <= MAX_URL_LEN ? normalized : null;
+            } catch (_) {
+                return null;
+            }
+        }
+
+        const isValidHttpURL = (url) => !!sanitizeURL(url);
 
         // ==================== 媒体辅助函数 ====================
         function getRealImageURL(img) {
@@ -780,11 +796,14 @@
                 const element = {
                     type: 'text',
                     text: {
-                        // 每项独立截断，追加标记也不会超限
                         content: content.length > RICH_TEXT_SAFE_LEN ? content.slice(0, RICH_TEXT_SAFE_LEN - 3) + '...' : content,
-                        link: item.text?.link || undefined
                     }
                 };
+                // 防御性二次校验：确保 link URL 合法
+                if (item.text?.link?.url) {
+                    const validUrl = sanitizeURL(item.text.link.url);
+                    if (validUrl) element.text.link = { url: validUrl };
+                }
                 if (item.annotations) element.annotations = item.annotations;
                 out.push(element);
             }
@@ -811,18 +830,21 @@
         const buildCodeBlock = (text, language) => buildSimpleBlock('code', text, { language: normalizeCodeLang(language) });
 
         // 媒体块：URL 非法时返回 null，由调用方过滤
-        function buildImageBlock(url) {
-            if (!isValidHttpURL(url)) return null;
+        function buildImageBlock(rawUrl) {
+            const url = sanitizeURL(rawUrl);
+            if (!url) return null;
             return { object: 'block', type: 'image', image: { type: 'external', external: { url } } };
         }
 
-        function buildVideoBlock(url) {
-            if (!isValidHttpURL(url)) return null;
+        function buildVideoBlock(rawUrl) {
+            const url = sanitizeURL(rawUrl);
+            if (!url) return null;
             return { object: 'block', type: 'video', video: { type: 'external', external: { url } } };
         }
 
-        function buildEmbedBlock(url) {
-            if (!isValidHttpURL(url)) return null;
+        function buildEmbedBlock(rawUrl) {
+            const url = sanitizeURL(rawUrl);
+            if (!url) return null;
             return { object: 'block', type: 'embed', embed: { url } };
         }
 
@@ -960,7 +982,8 @@
                             if (tempText) { richTexts.push({ text: { content: tempText } }); tempText = ''; }
                             const element = { text: { content: frag.text } };
                             // 仅保留合法 http(s) 链接，javascript: 等降级为纯文本
-                            if (frag.link && /^https?:\/\//i.test(frag.link)) element.text.link = { url: frag.link };
+                            const validLink = sanitizeURL(frag.link);
+                            if (validLink) element.text.link = { url: validLink };
                             if (frag.annotations) element.annotations = frag.annotations;
                             richTexts.push(element);
                         }
@@ -1050,7 +1073,7 @@
                 }
 
                 if (tag === 'A') {
-                    const href = node.href || '';
+                    const href = sanitizeURL(node.href) || sanitizeURL(node.getAttribute('href') || '');
                     const linkText = getInnerText(node);
                     if (linkText) {
                         currentFragments.push({ text: linkText, link: href || null, annotations: parentAnnotations });
@@ -1707,22 +1730,25 @@
                     if (type === 'select') properties[tagsPropName] = { select: { name: tags[0].slice(0, MAX_TAG_NAME_LEN) } };
                     else if (type === 'multi_select') properties[tagsPropName] = { multi_select: tags.map(t => ({ name: t.slice(0, MAX_TAG_NAME_LEN) })) };
                 }
-                if (dbProps['URL']?.type === 'url') properties['URL'] = { url: location.href.slice(0, MAX_URL_LEN) };
+                if (dbProps['URL']?.type === 'url') {
+                    const pageUrl = sanitizeURL(location.href);
+                    if (pageUrl) properties['URL'] = { url: pageUrl };
+                }
                 if (dbProps['Content Image']?.type === 'url') {
-                    const img = getPageMainImage();
-                    if (img && img.length <= MAX_URL_LEN) properties['Content Image'] = { url: img };
+                    const img = sanitizeURL(getPageMainImage());
+                    if (img) properties['Content Image'] = { url: img };
                 }
                 if (dbProps['Icon']?.type === 'url') {
-                    const icon = getPageIcon();
-                    if (isValidHttpURL(icon)) properties['Icon'] = { url: icon };
+                    const icon = sanitizeURL(getPageIcon());
+                    if (icon) properties['Icon'] = { url: icon };
                 }
 
                 const children = currentNotionBlocks;
                 const firstBatch = children.slice(0, NOTION_BATCH_SIZE);
                 const data = { parent: { database_id: dbId }, properties, children: firstBatch };
 
-                const iconUrl = getPageIcon();
-                if (isValidHttpURL(iconUrl)) data.icon = { type: 'external', external: { url: iconUrl } };
+                const iconUrl = sanitizeURL(getPageIcon());
+                if (iconUrl) data.icon = { type: 'external', external: { url: iconUrl } };
 
                 const response = await notionRequest('POST', 'https://api.notion.com/v1/pages', data);
                 const pageId = response.id;
