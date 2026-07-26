@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      2.3.1
-// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者，高清图标，自动标签，Twitter 优化，大图隐藏按钮。优化版：修复 H4-H6 标题、表格列数不一致、超长文本、非法代码语言及非法 URL 导致的 API 报错；网络错误重试；拖拽/点击体验优化。免疫 addEventListener hook 脚本。
+// @version      2.3.3
+// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者、问题链接及问题标题，高清图标，自动标签，Twitter 优化，大图隐藏按钮。优化版：修复 H4-H6 标题、表格列数不一致、超长文本、非法代码语言及非法 URL 导致的 API 报错；网络错误重试；拖拽/点击体验优化。免疫 addEventListener hook 脚本。
 // @author       yuhaung
 // @match        *://*/*
 // @noframes
@@ -908,7 +908,7 @@
             return { object: 'block', type: 'toggle', toggle };
         }
 
-        // ==================== 知乎清理（保留作者信息） ====================
+        // ==================== 知乎清理（保留作者信息与问题链接） ====================
         function cleanZhihuElement(clone) {
             clone.querySelectorAll(ZHIHU_REMOVE_SELECTORS.join(',')).forEach(el => el.remove());
             clone.querySelectorAll('img').forEach(img => {
@@ -959,6 +959,24 @@
                 }
             }
             return null;
+        }
+
+        // 新增：获取知乎问题/文章的源链接
+        function getZhihuSourceUrl(element) {
+            // 1. 尝试从回答卡片中提取问题链接 (优先寻找问题标题下的链接)
+            const linkEl = element.querySelector('h2 a[href*="/question/"]') ||
+                           element.querySelector('.ContentItem-title a[href*="/question/"]') ||
+                           element.querySelector('.QuestionItem-title a');
+            if (linkEl && linkEl.href) {
+                return sanitizeURL(linkEl.href);
+            }
+            // 2. 尝试从 URL 提取问题 ID
+            const match = location.pathname.match(/\/question\/(\d+)/);
+            if (match) {
+                return `https://www.zhihu.com/question/${match[1]}`;
+            }
+            // 3. 专栏文章或其他页面，直接返回当前 URL
+            return sanitizeURL(location.href);
         }
 
         // ==================== 内容解析 ====================
@@ -1245,32 +1263,33 @@
             return allBlocks.length > 0 ? allBlocks : null;
         }
 
+        // 修改：返回 blocks 和提取出来的标题 (如果有)
         function extractBlocksFromElement(el) {
             const twitterConv = extractTwitterConversationBlocks();
-            if (twitterConv) return twitterConv;
+            if (twitterConv) return { blocks: twitterConv, title: document.title };
 
             if (el.tagName === 'IMG') {
                 if (!isAvatar(el) && !isZhihuMemberImage(el)) {
                     let url = getRealImageURL(el);
                     if (url && isTwitter) url = upgradeTwitterImageURL(url);
                     const b = buildImageBlock(url);
-                    return b ? [b] : [];
+                    return { blocks: b ? [b] : [], title: document.title };
                 }
-                return [];
+                return { blocks: [], title: document.title };
             }
             if (el.tagName === 'VIDEO') {
                 const b = buildVideoBlock(getVideoURL(el));
-                return b ? [b] : [];
+                return { blocks: b ? [b] : [], title: document.title };
             }
             if (el.tagName === 'IFRAME') {
                 const b = buildEmbedBlock(getIframeEmbedURL(el));
-                return b ? [b] : [];
+                return { blocks: b ? [b] : [], title: document.title };
             }
             if (el.classList?.contains('GifPlayer')) {
                 const media = getGifPlayerMediaURL(el);
                 if (media) {
                     const b = media.type === 'video' ? buildVideoBlock(media.url) : buildImageBlock(media.url);
-                    return b ? [b] : [];
+                    return { blocks: b ? [b] : [], title: document.title };
                 }
             }
             if (isTwitter) {
@@ -1282,35 +1301,43 @@
                     const fragment = document.createDocumentFragment();
                     fragment.appendChild(clone);
                     const textBlocks = parseFragmentToBlocks(fragment);
-                    return [...textBlocks, ...mediaBlocks];
+                    return { blocks: [...textBlocks, ...mediaBlocks], title: document.title };
                 }
             }
             const clone = el.cloneNode(true);
             if (isZhihu) {
                 const questionTitle = getZhihuQuestionTitle(el);
+                const sourceUrl = getZhihuSourceUrl(el); // 提取链接
+                
                 if (questionTitle) {
                     ['.ContentItem-title', 'h2.ContentItem-title'].forEach(sel => {
                         clone.querySelectorAll(sel).forEach(n => n.remove());
                     });
-                    cleanZhihuElement(clone);
-                    const fragment = document.createDocumentFragment();
-                    fragment.appendChild(clone);
-                    const blocks = parseFragmentToBlocks(fragment);
-                    const prefix = [buildHeadingBlock(2, questionTitle)];
-                    const author = getZhihuAuthorName(el);
-                    if (author) prefix.push(buildTextBlock(`作者：${author}`));
-                    return [...prefix, ...blocks];
                 }
                 cleanZhihuElement(clone);
+                const fragment = document.createDocumentFragment();
+                fragment.appendChild(clone);
+                const blocks = parseFragmentToBlocks(fragment);
+
+                const prefix = [];
+                if (questionTitle) prefix.push(buildHeadingBlock(2, questionTitle));
+                const author = getZhihuAuthorName(el);
+                if (author) prefix.push(buildTextBlock(`作者：${author}`));
+                
+                // 加入知乎链接
+                if (sourceUrl) {
+                    const linkText = questionTitle ? '🔗 问题链接' : '🔗 原文链接';
+                    prefix.push(buildRichTextBlock([{
+                        type: 'text',
+                        text: { content: linkText, link: { url: sourceUrl } }
+                    }]));
+                }
+
+                return { blocks: [...prefix, ...blocks], title: questionTitle || document.title };
             }
             const fragment = document.createDocumentFragment();
             fragment.appendChild(clone);
-            let blocks = parseFragmentToBlocks(fragment);
-            if (isZhihu) {
-                const author = getZhihuAuthorName(el);
-                if (author) blocks = [buildTextBlock(`作者：${author}`), ...blocks];
-            }
-            return blocks;
+            return { blocks: parseFragmentToBlocks(fragment), title: document.title };
         }
 
         // ==================== 平台判断与目标查找 ====================
@@ -1409,11 +1436,11 @@
             if (!target || isOurUI(target)) return;
             const best = findBestTarget(target);
             if (!best) return;
-            const blocks = extractBlocksFromElement(best);
+            const { blocks, title } = extractBlocksFromElement(best);
             if (blocks.length === 0) { showToast('所选元素未提取到有效内容', 'error'); return; }
             stopSelectMode();
             currentNotionBlocks = blocks;
-            showConfirmModal(document.title);
+            showConfirmModal(title); // 使用提取出来的标题
         };
 
         function handleEsc(e) {
