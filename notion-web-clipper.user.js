@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Notion Web Clipper
 // @namespace    https://github.com/yuhaung/notion-web-clipper
-// @version      2.4.0
-// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者、问题链接及问题标题，高清图标，自动标签，Twitter 优化，大图隐藏按钮。优化版：修复注解合并、Shadow DOM 命中、Chrome 密码弹窗；性能与代码结构全面优化。
+// @version      2.5.0
+// @description  悬停高亮 + 单击选取，保留超链接、富文本、表格/折叠块，知乎自动提取作者、问题链接及问题标题，高清图标，自动标签，Twitter 优化，大图隐藏按钮。优化版：修复注解合并、Shadow DOM 命中、Chrome 密码弹窗；新增返回重选。
 // @author       yuhauang
 // @match        *://*/*
 // @noframes
@@ -167,11 +167,14 @@
   width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px;
 }
 .nc-modal textarea{height:200px;resize:vertical;font-family:monospace;font-size:13px;line-height:1.5}
-.nc-row{display:flex;gap:10px;justify-content:flex-end;margin-top:12px}
-.nc-b{padding:9px 18px;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px}
+.nc-row{display:flex;gap:10px;justify-content:flex-end;margin-top:12px;align-items:center}
+.nc-b{padding:9px 18px;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;transition:background .15s,transform .1s}
+.nc-b:active{transform:scale(.97)}
 .nc-b1{background:#2383e2;color:#fff}.nc-b1:hover{background:#1b6ec2}
 .nc-b1:disabled{background:#a0c4e8;cursor:not-allowed}
 .nc-b2{background:#f0f0f0;color:#333}.nc-b2:hover{background:#e0e0e0}
+.nc-bk{background:#fff;color:#2383e2;border:1.5px solid #2383e2}
+.nc-bk:hover{background:#eef4fb}
 .nc-help{font-size:12px;color:#888;margin-top:-6px;line-height:1.4}
 .nc-tw{position:relative;display:flex;align-items:center}
 .nc-tw input{flex:1;padding-right:40px}
@@ -256,6 +259,8 @@
   <label>标签 (逗号分隔，可选)</label>
   <input type="text" id="in-tags" placeholder="例如: 阅读, 技术" autocomplete="off">
   <div class="nc-row">
+   <button class="nc-b nc-bk" id="btn-back" title="返回重新选取元素">↩ 重选</button>
+   <span style="flex:1"></span>
    <button class="nc-b nc-b2" id="btn-cc">取消</button>
    <button class="nc-b nc-b1" id="btn-cs">发送</button>
   </div>
@@ -292,6 +297,7 @@
             title:   $('#in-title'),
             tags:    $('#in-tags'),
             send:    $('#btn-cs'),
+            back:    $('#btn-back'),
             okOpen:  $('#btn-oo'),
             okClose: $('#btn-oc'),
             tokTgl:  $('#btn-tv'),
@@ -1584,6 +1590,14 @@
             GM_setValue(STORAGE.TAGS_PROP, el.tag.value.trim());
             el.ovSet.style.display = 'none';
             toast('✅ 保存成功！');
+        });
+
+        // ↩ 重选：关闭确认框 → 清空已提取内容 → 重新进入框选模式
+        el.back.addEventListener('click', () => {
+            closeConfirm();
+            blocks = [];
+            hlTarget = null;
+            startSelect();
         });
 
         $('#btn-cc').addEventListener('click', closeConfirm);
