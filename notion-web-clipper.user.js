@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name Notion & Feishu & Obsidian Web Clipper
 // @namespace https://github.com/yuhaung/notion-web-clipper
-// @version      5.16.2
-// @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。变更日志见脚本头部 v5.16.x 注释与 CHANGELOG.md。
+// @version      5.18.0
+// @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。变更日志见脚本头部 v5.16.x ~ v5.18.x 注释与 CHANGELOG.md。
 // @author yuhauang
 // @match *://*/*
 // @noframes
@@ -66,7 +66,9 @@
  // ===== 常量与配置 =====
  // v5.16.1 修复：断点续传网络丢响应重复写入（Notion/飞书重试前对账已写入边界）、Obsidian 保存路径穿越、发送态异常按钮与进度条卡死、拖拽窗口外松手持续跟随、closed Shadow DOM Ctrl+A 选中预览、Notion 标签属性类型不兼容静默丢弃、提取异常停留选取模式、连接测试汇总显示失败原因；清理重复代码、统一命名注释；UI：设计令牌体系、WCAG AA 对比度、label/role/aria、窄屏断点、触摸目标、reduced-motion。
 // v5.16.2 修复：飞书断点续传边界被嵌套降级块污染（重试丢块）、拖拽复位定时器竞态、选取 rAF 清理遗漏、预览链接协议复验；统一 zh* 命名与分节注释；UI：模态焦点管理与 Tab 循环、进度条 aria 语义、占位符对比度、预览图片失败占位。
-const SCRIPT_VERSION = '5.16.2';
+// v5.17.0 UI 重做（纯表现层，业务与存储契约不变）：设计令牌补齐（圆角/间距/字阶/字体族/层级阴影/动效曲线，含暗色与高对比度覆写）；中文字体与 Emoji 字体回退补齐（原字体族无中文回退，中文环境易落宋体）；悬浮球改内联 SVG 剪刀图标（原 ✂️ 各平台字形差异大）+ 渐变材质 + 触摸命中区外扩；提示条去掉 nowrap/ellipsis（原长提示在窄屏被截断）+ 入场动画 + 毛玻璃；高亮框加圆角、遮罩加边缘暗角；弹窗 sticky 标题/底部按钮条上方漏内容（"穿模"）修复，底部改为渐隐遮罩 + margin-top:auto；设置面板分区卡片化（通用 / Notion / 飞书 / Obsidian / 标签 / 备份 / 历史 / 快捷键），原生复选框升级为滑动开关并带启用状态指示灯；确认面板新增发送目标徽章、可展开预览（原固定 250px）、按钮按主次分组；完成面板新增自动关闭倒计时；发送/重试按钮新增加载态；错误详情 word-break 由 break-all 改为 overflow-wrap:anywhere（不再把英文单词与 URL 任意截断）且改为左对齐；滚动条美化；新增 prefers-contrast 与 760px 中间断点。
+// v5.18.0 信息架构与交互补全（业务与存储契约不变）：① 设置面板改「左侧标签栏 + 右侧内容区」八分区导航（通用/Notion/飞书/Obsidian/标签/备份/历史/快捷键），≤600px 由 CSS 降级为手风琴，同一份 DOM 两套呈现；上次所在分区持久化（nc_set_tab）；点击确认面板平台徽章直达对应分区；标签栏支持 ↑/↓ 键盘导航与 role=tablist 语义。② 手动主题切换（跟随系统 / 浅色 / 深色，存储键 nc_theme）：暗色令牌抽出为单一来源 DARK_VARS，由「系统深色且未被手动指定浅色」与「手动深色」两条选择器共用，避免两份副本漂移；同步接管 prefers-contrast 与 color-scheme；主题随配置备份导出/导入。③ 自绘确认对话框替换全部 5 处原生 confirm()（关闭未保存设置、导出未保存提示、导出含明文密钥、清空发送历史、保存外部 Obsidian API 地址），返回 Promise 并接入既有焦点记忆 / Tab 循环 / Esc 层级；原生 confirm 在部分站点会被 CSP 或页面脚本拦截改写。④ 平台状态三态可视化：分区指示灯与标签栏指示灯改为 on / warn（已启用但凭据不全）/ off，设置面板内读表单实时值（勾掉开关立刻灯灭，无需先保存）；悬浮球新增角标显示已就绪平台数，0 个时转警示态。⑤ 修正 Esc / Tab 的叠加层级顺序（ovSet 与 ovAsk 排在最前）。
+const SCRIPT_VERSION = '5.18.0';
  const C = Object.freeze({
   TEXT_SAFE: 1990, RT_ITEMS_MAX: 100, BATCH_SIZE: 100,
   TABLE_MAX_COLS: 5, TABLE_MAX_ROWS: 100, TAG_NAME_MAX: 100, URL_MAX: 2000,
@@ -100,6 +102,8 @@ const SCRIPT_VERSION = '5.16.2';
   DOMAIN_TAGS: 'nc_domain_tags',
   SEND_PROFILE: 'nc_send_profile',
   HISTORY: 'nc_send_history',
+  THEME: 'nc_theme',
+  SET_TAB: 'nc_set_tab',
 });
 
  const FS_BLK = Object.freeze({ TEXT: 2, H1: 3, H2: 4, H3: 5, H4: 6, H5: 7, H6: 8, H7: 9, H8: 10, H9: 11, BULLET: 12, ORDERED: 13, CODE: 14, QUOTE: 15, DIVIDER: 22, IMAGE: 27 });
@@ -645,6 +649,7 @@ function parseResponseHeader(res, name) {
    blocklist: GM_getValue(STORAGE.BLOCKLIST, ''),
    domainTags: GM_getValue(STORAGE.DOMAIN_TAGS, ''),
    sendProfile: GM_getValue(STORAGE.SEND_PROFILE, 'gentle'),
+   theme: GM_getValue(STORAGE.THEME, 'auto'),
   };
 }
  let S = readSettings();
@@ -652,67 +657,162 @@ function parseResponseHeader(res, name) {
  const getProfile = () => SEND_PROFILES[S.sendProfile] || SEND_PROFILES.gentle;
 
  // ===== UI 样式与模板 =====
+// 暗色令牌只写一份，由「系统深色且未被手动指定浅色」与「手动指定深色」两条选择器共用，
+// 避免同一套色值出现两份副本后逐渐漂移。
+const DARK_VARS = `--c-bg:#1e1e1e;--c-surface-sunken:#242424;--c-scrollbar:#4a4a4a;--c-scrollbar-hover:#626262;--c-badge-on-bg:#243447;--c-badge-on-text:#8ec2f5;--c-badge-off-bg:#2f2f2f;--c-badge-off-text:#9a9a9a;--sh-pop:0 8px 24px rgba(0,0,0,.5);--sh-hi:0 12px 28px rgba(0,0,0,.6);--sh-inset-t:inset 0 1px 0 rgba(255,255,255,.08);--c-toast-shadow:0 6px 20px rgba(0,0,0,.45);--c-text:#e0e0e0;--c-text-sec:#bbb;--c-border:#444;--c-border-hover:#5a5a5a;--c-input-bg:#2a2a2a;--c-bg-sec:#333;--c-pv-bg:#2a2a2a;--c-pv-text:#ddd;--c-pv-border:#444;--c-code-bg:#333;--c-th-bg:#383838;--c-td-border:#555;--c-btn-sec-bg:#333;--c-btn-sec-text:#e0e0e0;--c-btn-ghost-bg:#1e1e1e;--c-btn-ghost-text:#5b9fe6;--c-btn-ghost-border:#5b9fe6;--c-help:#9a9a9a;--c-kbd-bg:#333;--c-kbd-border:#555;--c-progress-bg:#444;--c-err-bg:#3a1a1a;--c-err-border:#5c2828;--c-err-text:#ff6b6b;--c-err-succ-bg:#1a3a1a;--c-err-succ-border:#2d5c2d;--c-err-succ-text:#6bdf6b;--c-accent:#5b9fe6;--c-accent-hover:#4a8ed5;--c-accent-strong:#5b9fe6;--c-accent-ink:#5b9fe6;--c-toast-info:#b45309;--c-ring:rgba(91,159,230,.2);--c-success:#6bdf6b;--c-success-solid:#2d7d46;--c-danger:#ff6b6b;--c-danger-solid:#b71c1c;--c-danger-solid-hover:#8e1414;--c-warn:#f0a860;--c-accent-soft:#243447;--c-hl-fill:rgba(91,159,230,.16);--c-hl-inner:rgba(255,255,255,.35);--c-hl-ring:rgba(91,159,230,.28);--c-focus-ring:rgba(91,159,230,.5);--c-scrim:rgba(0,0,0,.72);--c-tip-bg:rgba(0,0,0,.88);--c-tip-text:#fff;--c-placeholder:#9a9a9a;--c-btn-disabled-bg:#2f2f2f;--c-btn-disabled-text:#9a9a9a;--c-brand-fs:#5b95ff;--c-brand-obs:#a78bfa;--sh-float:0 4px 12px rgba(0,0,0,.45);--sh-modal:0 24px 48px rgba(0,0,0,.55),0 4px 12px rgba(0,0,0,.35);--dur-fast:.15s;--dur-base:.2s;--ease:cubic-bezier(.2,0,.2,1)`;
  const PANEL_CSS = `:host{all:initial;color-scheme:light dark;--c-bg:#fff;--c-text:#333;--c-text-sec:#555;--c-border:#ddd;--c-border-hover:#bfbfbf;--c-input-bg:#fff;--c-bg-sec:#f0f0f0;--c-pv-bg:#fafafa;--c-pv-text:#333;--c-pv-border:#eee;--c-code-bg:#f0f0f0;--c-th-bg:#e8e8e8;--c-td-border:#ccc;--c-btn-sec-bg:#f0f0f0;--c-btn-sec-text:#333;--c-btn-ghost-bg:#fff;--c-btn-ghost-text:#1667bb;--c-btn-ghost-border:#2383e2;--c-help:#6f6f6f;--c-kbd-bg:#f0f0f0;--c-kbd-border:#ccc;--c-progress-bg:#eee;--c-err-bg:#fff5f5;--c-err-border:#ffcdd2;--c-err-text:#d32f2f;--c-err-succ-bg:#f1f8e9;--c-err-succ-border:#c8e6c9;--c-err-succ-text:#2d7d46;--c-accent:#2383e2;--c-accent-hover:#1b6ec2;--c-accent-strong:#1b6ec2;--c-accent-ink:#1667bb;--c-toast-info:#b45309;--c-ring:rgba(27,110,194,.16);--c-success:#2d7d46;--c-success-solid:#2d7d46;--c-danger:#d32f2f;--c-danger-solid:#c62828;--c-danger-solid-hover:#b71c1c;--c-warn:#b45309;--c-accent-soft:#eaf2fb;--c-hl-fill:rgba(35,131,226,.1);--c-hl-inner:rgba(255,255,255,.6);--c-hl-ring:rgba(35,131,226,.22);--c-focus-ring:rgba(35,131,226,.45);--c-scrim:rgba(0,0,0,.6);--c-tip-bg:rgba(0,0,0,.85);--c-tip-text:#fff;--c-placeholder:#767676;--c-btn-disabled-bg:#f0f0f0;--c-btn-disabled-text:#555;--c-brand-fs:#2c62e0;--c-brand-obs:#7c3aed;--sh-float:0 4px 12px rgba(0,0,0,.15);--sh-modal:0 24px 48px rgba(15,23,42,.16),0 4px 12px rgba(15,23,42,.08);--dur-fast:.15s;--dur-base:.2s;--ease:cubic-bezier(.2,0,.2,1)}
-*{box-sizing:border-box;margin:0;padding:0;line-height:1.5;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+:host{--font-sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono","Courier New",monospace;--r-xs:3px;--r-sm:4px;--r-md:6px;--r-lg:8px;--r-xl:12px;--r-2xl:16px;--r-full:999px;--sp-1:4px;--sp-2:6px;--sp-3:8px;--sp-4:12px;--sp-5:16px;--sp-6:20px;--sp-7:28px;--fs-xs:11px;--fs-sm:12px;--fs-base:13px;--fs-md:14px;--fs-lg:16px;--fs-xl:18px;--lh-tight:1.35;--lh-base:1.55;--sh-pop:0 8px 24px rgba(0,0,0,.18);--sh-hi:0 12px 28px rgba(15,23,42,.22);--sh-inset-t:inset 0 1px 0 rgba(255,255,255,.6);--dur-slow:.3s;--ease-out:cubic-bezier(.16,1,.3,1);--ease-spring:cubic-bezier(.34,1.4,.64,1);--c-scrollbar:#cfcfcf;--c-scrollbar-hover:#b0b0b0;--c-surface-sunken:#fafafa;--c-badge-on-bg:#eaf2fb;--c-badge-on-text:#1667bb;--c-badge-off-bg:#f0f0f0;--c-badge-off-text:#767676;--c-toast-shadow:0 6px 20px rgba(15,23,42,.2)}
+*{box-sizing:border-box;margin:0;padding:0;line-height:var(--lh-base);font-family:var(--font-sans)}
 ::placeholder{color:var(--c-placeholder);opacity:1}
-.nc-btn{position:fixed;width:${C.BTN_SIZE}px;height:${C.BTN_SIZE}px;border-radius:50%;background:var(--c-accent);color:#fff;border:2px solid #fff;cursor:pointer;box-shadow:var(--sh-float);font-size:24px;display:flex;align-items:center;justify-content:center;transition:left var(--dur-base) var(--ease),top var(--dur-base) var(--ease),opacity var(--dur-base) var(--ease),transform var(--dur-fast) var(--ease);user-select:none;touch-action:none;pointer-events:auto;left:auto;right:20px;top:auto;bottom:20px;will-change:left,top}
-.nc-btn:hover{background:var(--c-accent-hover);transform:scale(1.05)}
-.nc-btn:active{transform:scale(.97)}
-.nc-btn.edge{opacity:.72}
-.nc-btn:focus-visible{outline:2px solid #fff;outline-offset:2px;box-shadow:0 0 0 4px var(--c-focus-ring)}
-button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
-.nc-tip{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--c-tip-bg);color:var(--c-tip-text);padding:10px 20px;border-radius:24px;font-size:14px;pointer-events:none;box-shadow:var(--sh-float);display:none;z-index:1;max-width:90vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.nc-hl{position:fixed;top:0;left:0;width:0;height:0;border:3px solid var(--c-accent);background:var(--c-hl-fill);box-shadow:0 0 0 1px var(--c-hl-inner),0 0 0 5px var(--c-hl-ring);pointer-events:none;display:none;will-change:transform}
-.nc-mask{position:fixed;top:0;left:0;width:100%;height:100%;z-index:-1;display:none;cursor:crosshair;pointer-events:auto}
-.nc-ov{position:fixed;top:0;left:0;width:100%;height:100%;background:var(--c-scrim);display:none;align-items:center;justify-content:center;pointer-events:auto}
-.nc-ov.nc-ov-tr{background:transparent;align-items:flex-start;justify-content:flex-end;pointer-events:none;padding:20px}
+::selection{background:var(--c-accent-soft);color:var(--c-text)}
+.nc-host-scroll::-webkit-scrollbar,.nc-modal::-webkit-scrollbar,.nc-pv::-webkit-scrollbar,.nc-err::-webkit-scrollbar,.nc-panes::-webkit-scrollbar,.nc-nav::-webkit-scrollbar{width:10px;height:10px}
+.nc-modal::-webkit-scrollbar-track,.nc-pv::-webkit-scrollbar-track,.nc-err::-webkit-scrollbar-track,.nc-panes::-webkit-scrollbar-track,.nc-nav::-webkit-scrollbar-track{background:transparent}
+.nc-modal::-webkit-scrollbar-thumb,.nc-pv::-webkit-scrollbar-thumb,.nc-err::-webkit-scrollbar-thumb,.nc-panes::-webkit-scrollbar-thumb,.nc-nav::-webkit-scrollbar-thumb{background:var(--c-scrollbar);border-radius:var(--r-full);border:3px solid var(--c-bg);background-clip:padding-box}
+.nc-modal::-webkit-scrollbar-thumb:hover,.nc-pv::-webkit-scrollbar-thumb:hover,.nc-err::-webkit-scrollbar-thumb:hover,.nc-panes::-webkit-scrollbar-thumb:hover,.nc-nav::-webkit-scrollbar-thumb:hover{background:var(--c-scrollbar-hover);background-clip:padding-box}
+.nc-panes{scrollbar-width:thin;scrollbar-color:var(--c-scrollbar) transparent}
+.nc-pv::-webkit-scrollbar-thumb,.nc-err::-webkit-scrollbar-thumb{border-color:var(--c-pv-bg)}
+.nc-err::-webkit-scrollbar-thumb{border-color:var(--c-err-bg)}
+.nc-modal{scrollbar-width:thin;scrollbar-color:var(--c-scrollbar) transparent}
+.nc-btn{position:fixed;width:${C.BTN_SIZE}px;height:${C.BTN_SIZE}px;border-radius:var(--r-full);background:linear-gradient(180deg,var(--c-accent-hover),var(--c-accent) 60%);color:#fff;border:2px solid #fff;cursor:pointer;box-shadow:var(--sh-float),var(--sh-inset-t);font-size:24px;line-height:1;display:flex;align-items:center;justify-content:center;transition:left var(--dur-base) var(--ease),top var(--dur-base) var(--ease),opacity var(--dur-slow) var(--ease),transform var(--dur-fast) var(--ease-spring),box-shadow var(--dur-base) var(--ease),filter var(--dur-base) var(--ease);user-select:none;-webkit-user-select:none;touch-action:none;-webkit-tap-highlight-color:transparent;pointer-events:auto;left:auto;right:20px;top:auto;bottom:20px;will-change:left,top;padding:0}
+.nc-btn-ico{width:24px;height:24px;display:block;pointer-events:none;filter:drop-shadow(0 1px 1px rgba(0,0,0,.25));transition:transform var(--dur-base) var(--ease-spring)}
+.nc-btn:hover{background:linear-gradient(180deg,var(--c-accent),var(--c-accent-hover));transform:scale(1.06);box-shadow:var(--sh-pop),var(--sh-inset-t)}
+.nc-btn:hover .nc-btn-ico{transform:rotate(-10deg) scale(1.05)}
+.nc-btn:active{transform:scale(.94)}
+.nc-btn:active .nc-btn-ico{transform:rotate(0) scale(.92)}
+/* 悬浮球角标：一眼看出当前有几个平台已就绪；0 个时转为警示态，避免用户点开才发现没配置 */
+.nc-btn-badge{position:absolute;top:-3px;right:-3px;min-width:18px;height:18px;padding:0 5px;border-radius:var(--r-full);background:var(--c-success-solid);color:#fff;font-size:10px;font-weight:700;line-height:18px;text-align:center;letter-spacing:0;box-shadow:0 0 0 2px var(--c-bg);pointer-events:none;font-family:var(--font-sans)}
+.nc-btn-badge.is-warn{background:var(--c-warn);color:#fff8ec}
+.nc-btn-badge[hidden]{display:none}
+.nc-btn.edge{opacity:.58;filter:saturate(.82)}
+.nc-btn.edge:hover{opacity:1;filter:none}
+.nc-btn:focus-visible{outline:2px solid #fff;outline-offset:2px;box-shadow:0 0 0 4px var(--c-focus-ring),var(--sh-pop)}
+@media (pointer:coarse){.nc-btn::after{content:'';position:absolute;inset:-7px;border-radius:var(--r-full)}}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px;border-radius:var(--r-sm)}
+.nc-tip{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--c-tip-bg);color:var(--c-tip-text);padding:10px 18px;border-radius:var(--r-xl);font-size:var(--fs-md);font-weight:500;letter-spacing:.01em;text-align:center;text-wrap:balance;pointer-events:none;box-shadow:var(--sh-pop);display:none;z-index:1;width:max-content;max-width:min(560px,92vw);line-height:var(--lh-tight);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);animation:nc-tip-in .22s var(--ease-out)}
+@keyframes nc-tip-in{from{opacity:0;transform:translateX(-50%) translateY(-10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+.nc-hl{position:fixed;top:0;left:0;width:0;height:0;border:3px solid var(--c-accent);border-radius:var(--r-md);background:var(--c-hl-fill);box-shadow:0 0 0 1px var(--c-hl-inner),0 0 0 5px var(--c-hl-ring),0 6px 18px var(--c-hl-ring);transition:none;pointer-events:none;display:none;will-change:transform}
+.nc-mask{position:fixed;top:0;left:0;width:100%;height:100%;z-index:-1;display:none;cursor:crosshair;pointer-events:auto;background:radial-gradient(120% 90% at 50% 45%,transparent 55%,rgba(15,23,42,.14) 100%)}
+.nc-ov{position:fixed;top:0;left:0;width:100%;height:100%;background:var(--c-scrim);display:none;align-items:center;justify-content:center;pointer-events:auto;backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);animation:nc-fade-in .18s var(--ease)}
+.nc-ov.nc-ov-tr{background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;animation:none;align-items:flex-start;justify-content:flex-end;pointer-events:none;padding:24px}
 .nc-ov.nc-ov-tr .nc-modal{pointer-events:auto;width:420px;max-width:calc(100vw - 40px);max-height:calc(100vh - 40px);box-shadow:var(--sh-modal);animation:nc-slide-in .25s var(--ease)}
 .nc-ov.nc-ov-tr .nc-modal.minimized{width:auto}
 @keyframes nc-slide-in{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
 @keyframes nc-fade-in{from{opacity:0;transform:scale(.98)}to{opacity:1;transform:scale(1)}}
-.nc-modal{background:var(--c-bg);padding:28px;border-radius:12px;width:580px;max-width:92vw;max-height:88vh;overflow-y:auto;box-shadow:var(--sh-modal);display:flex;flex-direction:column;gap:14px;color:var(--c-text);animation:nc-fade-in .18s var(--ease)}
-.nc-modal h2{font-size:18px;color:var(--c-text);position:sticky;top:0;z-index:2;background:var(--c-bg)}
-.nc-modal-h2{display:flex;align-items:center;justify-content:space-between}
-.nc-min{background:none;border:none;cursor:pointer;font-size:16px;color:var(--c-help);padding:2px 8px;line-height:1;border-radius:4px;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.nc-modal{background:var(--c-bg);padding:var(--sp-7);border-radius:var(--r-xl);width:580px;max-width:92vw;max-height:88vh;overflow-y:auto;overscroll-behavior:contain;box-shadow:var(--sh-modal),0 0 0 1px rgba(15,23,42,.06);display:flex;flex-direction:column;gap:var(--sp-4);color:var(--c-text);animation:nc-fade-in .18s var(--ease)}
+.nc-modal h2{font-size:var(--fs-xl);font-weight:650;line-height:var(--lh-tight);letter-spacing:.01em;color:var(--c-text);position:sticky;top:0;z-index:3;background:var(--c-bg);padding-bottom:var(--sp-3)}
+.nc-modal:not(.minimized) h2::before{content:'';position:absolute;left:0;right:0;top:-28px;height:28px;background:var(--c-bg)}
+.nc-modal:not(.minimized) h2::after{content:'';position:absolute;left:0;right:0;bottom:-9px;height:8px;background:linear-gradient(to bottom,rgba(0,0,0,.055),transparent);pointer-events:none}
+.nc-modal-h2{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3)}
+.nc-min{background:none;border:none;cursor:pointer;font-size:15px;line-height:1;color:var(--c-help);width:28px;height:28px;flex:none;display:flex;align-items:center;justify-content:center;padding:0;border-radius:var(--r-sm);transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease);font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif}
 .nc-min:hover{background:var(--c-bg-sec);color:var(--c-accent)}
-.nc-min:active{transform:scale(.94)}
+.nc-min:active{transform:scale(.9)}
 .nc-min:disabled{color:var(--c-btn-disabled-text);cursor:not-allowed}
-.nc-modal.minimized{padding:12px 24px;gap:0;max-height:none;overflow:visible}
+.nc-modal.minimized{padding:8px 10px 8px 18px;gap:0;max-height:none;overflow:visible;border-radius:var(--r-full);box-shadow:var(--sh-pop),0 0 0 1px rgba(15,23,42,.06)}
+.nc-modal.minimized h2{font-size:var(--fs-md);padding-bottom:0;white-space:nowrap}
 .nc-modal.minimized h2 ~ *{display:none !important}
-.nc-modal h3{font-size:15px;color:var(--c-text-sec);margin-top:16px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--c-border);padding-bottom:4px}
-.nc-modal label{font-size:13px;color:var(--c-text-sec);font-weight:600;margin-top:4px}
-.nc-modal input,.nc-modal select,.nc-modal textarea{width:100%;padding:10px;border:1px solid var(--c-border);border-radius:6px;font-size:14px;background:var(--c-input-bg);color:var(--c-text);transition:border-color var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease)}
+.nc-modal h3{font-size:var(--fs-lg);font-weight:650;letter-spacing:.01em;color:var(--c-text);margin-top:var(--sp-5);display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--c-border);padding-bottom:var(--sp-2)}
+.nc-modal h3 > span:first-child{display:inline-flex;align-items:center;gap:var(--sp-2)}
+.nc-modal label{font-size:var(--fs-base);color:var(--c-text-sec);font-weight:600;letter-spacing:.01em;margin-top:var(--sp-1)}
+.nc-modal input,.nc-modal select,.nc-modal textarea{width:100%;padding:9px 11px;border:1px solid var(--c-border);border-radius:var(--r-md);font-size:var(--fs-md);background:var(--c-input-bg);color:var(--c-text);transition:border-color var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
 .nc-modal input:hover,.nc-modal select:hover,.nc-modal textarea:hover{border-color:var(--c-border-hover)}
 .nc-modal input:focus,.nc-modal select:focus,.nc-modal textarea:focus{border-color:var(--c-accent);box-shadow:0 0 0 3px var(--c-ring);outline:none}
-.nc-modal textarea{resize:vertical;min-height:56px;line-height:1.5;font-family:inherit}
-.nc-row{display:flex;flex-wrap:wrap;gap:8px 10px;justify-content:flex-end;align-items:center}
-.nc-modal > .nc-row:last-child{position:sticky;bottom:0;background:var(--c-bg);margin-top:12px;padding-top:4px}
-.nc-b{padding:9px 18px;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;transition:filter var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease);white-space:nowrap}
+.nc-modal select{cursor:pointer;appearance:none;-webkit-appearance:none;padding-right:32px;background-image:linear-gradient(45deg,transparent 50%,var(--c-help) 50%),linear-gradient(135deg,var(--c-help) 50%,transparent 50%);background-position:calc(100% - 17px) calc(50% + 1px),calc(100% - 12px) calc(50% + 1px);background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.nc-modal textarea{resize:vertical;min-height:56px;line-height:var(--lh-base);font-family:var(--font-mono);font-size:var(--fs-base)}
+.nc-sec{background:var(--c-surface-sunken);border:1px solid var(--c-border);border-radius:var(--r-lg);padding:var(--sp-4);margin-top:var(--sp-4);display:flex;flex-direction:column;gap:var(--sp-3);transition:border-color var(--dur-base) var(--ease)}
+.nc-sec:focus-within{border-color:var(--c-border-hover)}
+.nc-sec > h3{margin-top:0;padding-bottom:var(--sp-2)}
+.nc-sec > .nc-help:last-child{margin-bottom:0}
+.nc-dot{width:7px;height:7px;border-radius:var(--r-full);flex:none;background:var(--c-border);box-shadow:0 0 0 3px var(--c-badge-off-bg);transition:background var(--dur-base) var(--ease),box-shadow var(--dur-base) var(--ease)}
+/* 标签栏与手风琴标题上的状态点：语义色（绿=就绪 / 琥珀=凭据不全），
+   区别于分区卡片内用品牌色的那颗——导航位只回答「能不能用」，不回答「是哪家」 */
+.nc-dot.on{background:var(--c-success);box-shadow:0 0 0 3px var(--c-err-succ-bg)}
+.nc-dot.warn{background:var(--c-warn);box-shadow:0 0 0 3px var(--c-err-succ-bg)}
+.nc-sec.on > h3 .nc-dot{background:var(--c-success);box-shadow:0 0 0 3px var(--c-err-succ-bg)}
+.nc-plat-hd{display:inline-flex;align-items:center;gap:var(--sp-2);font-weight:650}
+.nc-sec[data-plat=notion].on > h3 .nc-plat-hd{color:var(--c-text)}
+.nc-sec[data-plat=feishu].on > h3 .nc-dot{background:var(--c-brand-fs);box-shadow:0 0 0 3px var(--c-accent-soft)}
+.nc-sec[data-plat=obsidian].on > h3 .nc-dot{background:var(--c-brand-obs);box-shadow:0 0 0 3px var(--c-accent-soft)}
+.nc-sec.warn > h3 .nc-dot{background:var(--c-warn);box-shadow:0 0 0 3px var(--c-err-succ-bg)}
+/* 纯 CSS 显隐，无需 JS 参与：开关已开但凭据不全时明确告知会被跳过，避免「明明勾了却没发出去」 */
+.nc-warn-hint{display:none;font-size:var(--fs-sm);color:var(--c-warn);border:1px solid var(--c-warn);border-radius:var(--r-md);padding:6px 10px;line-height:var(--lh-base)}
+.nc-sec.warn > .nc-warn-hint{display:block}
+/* ---------- 设置面板：左侧标签栏 + 右侧内容区（≤600px 降级为手风琴） ---------- */
+.nc-set{width:min(740px,94vw);overflow:hidden}
+.nc-set-body{display:flex;gap:var(--sp-5);align-items:stretch;flex:1 1 auto;min-height:0;overflow:hidden}
+.nc-nav{flex:none;width:130px;display:flex;flex-direction:column;gap:2px;padding-right:var(--sp-4);margin-right:0;border-right:1px solid var(--c-border);overflow-y:auto;overscroll-behavior:contain}
+.nc-nav-i{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:none;border-radius:var(--r-md);background:transparent;color:var(--c-text-sec);font-family:inherit;font-size:var(--fs-base);font-weight:600;line-height:var(--lh-tight);text-align:left;cursor:pointer;white-space:nowrap;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.nc-nav-i:hover{background:var(--c-bg-sec);color:var(--c-text)}
+.nc-nav-i[aria-selected=true]{background:var(--c-accent-soft);color:var(--c-accent);font-weight:650}
+.nc-nav-ico{flex:none;width:16px;text-align:center;font-size:14px;line-height:1;font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",var(--font-sans)}
+.nc-nav-t{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis}
+.nc-nav-i .nc-dot{margin-left:2px;box-shadow:0 0 0 2.5px var(--c-badge-off-bg)}
+.nc-nav-i .nc-dot.on,.nc-nav-i .nc-dot.warn{box-shadow:0 0 0 2.5px var(--c-err-succ-bg)}
+.nc-pane-hd .nc-dot{margin-left:6px;box-shadow:0 0 0 2.5px var(--c-badge-off-bg)}
+.nc-pane-hd .nc-dot.on,.nc-pane-hd .nc-dot.warn{box-shadow:0 0 0 2.5px var(--c-err-succ-bg)}
+.nc-panes{flex:1 1 auto;min-width:0;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}
+.nc-pane{display:none;flex-direction:column}
+.nc-pane.active{display:flex;animation:nc-pane-in .2s var(--ease-out)}
+@keyframes nc-pane-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.nc-pane-hd{display:none}
+.nc-pane > .nc-sec:first-of-type{margin-top:0}
+/* ---------- 自绘询问框 ---------- */
+.nc-ask-msg{font-size:var(--fs-md);color:var(--c-text-sec);white-space:pre-wrap;overflow-wrap:anywhere;line-height:var(--lh-base)}
+.nc-row{display:flex;flex-wrap:wrap;gap:var(--sp-3) 10px;justify-content:flex-end;align-items:center}
+.nc-modal > .nc-row:last-child{position:sticky;bottom:0;z-index:2;background:var(--c-bg);margin-top:auto;padding:var(--sp-4) 0 2px}
+.nc-modal > .nc-row:last-child::before{content:'';position:absolute;left:0;right:0;bottom:100%;height:18px;background:linear-gradient(to top,var(--c-bg) 35%,transparent);pointer-events:none}
+.nc-sep{flex:none;align-self:stretch;width:1px;min-height:24px;margin:0 2px;background:var(--c-border)}
+.nc-grow{flex:1 1 auto}
+.nc-b{padding:9px 16px;border:none;border-radius:var(--r-md);cursor:pointer;font-weight:600;font-size:var(--fs-md);letter-spacing:.01em;line-height:var(--lh-tight);transition:filter var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease);white-space:nowrap;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
 .nc-b:active{transform:scale(.97)}
-.nc-b1{background:var(--c-accent-strong);color:#fff}
-.nc-b1:hover{filter:brightness(0.92)}
+.nc-b1{background:var(--c-accent-strong);color:#fff;box-shadow:0 1px 2px rgba(15,23,42,.14)}
+.nc-b1:hover{filter:brightness(.94);box-shadow:0 4px 14px rgba(35,131,226,.3)}
 .nc-b2{background:var(--c-btn-sec-bg);color:var(--c-btn-sec-text)}
-.nc-b2:hover{filter:brightness(0.95)}
+.nc-b2:hover{filter:brightness(.95);background:var(--c-border)}
 .nc-bk{background:var(--c-btn-ghost-bg);color:var(--c-btn-ghost-text);border:1.5px solid var(--c-btn-ghost-border)}
-.nc-bk:hover{filter:brightness(0.95)}
+.nc-bk:hover{filter:none;background:var(--c-accent-soft)}
+.nc-bk:active{background:var(--c-accent-soft)}
+.nc-b-sm{padding:6px 11px;font-size:var(--fs-sm);font-weight:600;border-width:1px}
+.nc-b.is-loading{position:relative;padding-left:34px;pointer-events:none}
+.nc-b.is-loading::before{content:'';position:absolute;left:12px;top:50%;width:13px;height:13px;margin-top:-7px;border:2px solid currentColor;border-top-color:transparent;border-radius:var(--r-full);opacity:.6;animation:nc-spin .6s linear infinite}
+@keyframes nc-spin{to{transform:rotate(360deg)}}
 .nc-bk-brand-fs{color:var(--c-brand-fs);border-color:var(--c-brand-fs)}
+.nc-bk-brand-fs:hover{background:var(--c-accent-soft)}
 .nc-bk-brand-obs{color:var(--c-brand-obs);border-color:var(--c-brand-obs)}
-.nc-br{background:var(--c-danger-solid);color:#fff}
-.nc-br:hover{background:var(--c-danger-solid-hover)}
+.nc-bk-brand-obs:hover{background:var(--c-accent-soft)}
+.nc-br{background:var(--c-danger-solid);color:#fff;box-shadow:0 1px 2px rgba(15,23,42,.14)}
+.nc-br:hover{background:var(--c-danger-solid-hover);box-shadow:0 4px 14px rgba(198,40,40,.3)}
 .nc-b:disabled,.nc-br:disabled,.nc-tb:disabled{background:var(--c-btn-disabled-bg);color:var(--c-btn-disabled-text);border-color:var(--c-border);cursor:not-allowed;filter:none;opacity:1;transform:none}
 .nc-b:disabled:hover,.nc-br:disabled:hover,.nc-tb:disabled:hover{filter:none;transform:none;background:var(--c-btn-disabled-bg)}
-.nc-help{font-size:12px;color:var(--c-help);margin-top:-6px;line-height:1.4}
-.nc-help a{color:var(--c-accent-ink)}
+.nc-help{font-size:var(--fs-sm);color:var(--c-help);margin-top:-4px;line-height:1.55}
+.nc-help a{color:var(--c-accent-ink);text-decoration:underline;text-underline-offset:2px}
 .nc-tw{position:relative;display:flex;align-items:center}
 .nc-tw input{flex:1;padding-right:40px}
-.nc-tv{position:absolute;right:8px;background:none;border:none;cursor:pointer;font-size:16px;color:var(--c-help);padding:4px;border-radius:4px;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
-.nc-tv:hover{background:var(--c-bg-sec);color:var(--c-accent)}
-.nc-tv:active{transform:scale(.94)}
-.nc-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--c-text-sec);font-weight:400;cursor:pointer;white-space:nowrap}
+.nc-tv{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:none;border:none;border-radius:var(--r-sm);cursor:pointer;font-size:15px;line-height:1;color:var(--c-help);padding:0;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease);font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif}
+.nc-tv:hover{background:var(--c-bg-sec);color:var(--c-accent);transform:translateY(-50%)}
+.nc-tv:active{transform:translateY(-50%) scale(.9)}
+.nc-switch{display:inline-flex;align-items:center;gap:var(--sp-2);font-size:var(--fs-sm);color:var(--c-text-sec);font-weight:500;cursor:pointer;white-space:nowrap;user-select:none;-webkit-user-select:none}
 .nc-switch:hover{color:var(--c-accent)}
-.nc-switch input{width:auto;accent-color:var(--c-accent)}
-.nc-pv{border:1px solid var(--c-pv-border);border-radius:8px;padding:14px;margin-top:8px;max-height:250px;overflow-y:auto;background:var(--c-pv-bg);font-size:13px;line-height:1.65;user-select:text;-webkit-user-select:text}
+.nc-modal .nc-switch input{width:34px;height:20px;flex:none;margin:0;padding:0;border:none;border-radius:var(--r-full);background:var(--c-border);position:relative;cursor:pointer;appearance:none;-webkit-appearance:none;transition:background var(--dur-base) var(--ease)}
+.nc-modal .nc-switch input::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:var(--r-full);background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform var(--dur-base) var(--ease-spring)}
+.nc-modal .nc-switch input:checked{background:var(--c-accent)}
+.nc-modal .nc-switch input:checked::after{transform:translateX(14px)}
+.nc-modal .nc-switch input:hover{border:none;background:var(--c-border-hover)}
+.nc-modal .nc-switch input:checked:hover{background:var(--c-accent-hover)}
+.nc-modal .nc-switch input:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px;box-shadow:none}
+.nc-pv{border:1px solid var(--c-pv-border);border-radius:var(--r-lg);padding:var(--sp-4);margin-top:0;max-height:250px;overflow-y:auto;overscroll-behavior:contain;background:var(--c-pv-bg);font-size:var(--fs-base);line-height:1.7;user-select:text;-webkit-user-select:text;transition:max-height var(--dur-slow) var(--ease-out)}
+.nc-pv.expanded{max-height:min(58vh,560px)}
 .nc-pv:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+.nc-pv-head{display:flex;align-items:center;gap:var(--sp-3);margin-top:var(--sp-2);min-height:26px}
+.nc-pv-head > label{margin-top:0}
+.nc-pv-head .nc-info{margin-top:0;margin-left:auto;text-align:left;flex:none}
+.nc-plats{display:flex;flex-wrap:wrap;gap:var(--sp-2);align-items:center}
+.nc-plat{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:var(--r-full);font-size:var(--fs-sm);font-weight:600;letter-spacing:.01em;line-height:1.5;border:1px solid transparent;cursor:pointer;user-select:none;-webkit-user-select:none;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease)}
+.nc-plat::before{content:'';width:6px;height:6px;border-radius:var(--r-full);background:currentColor;flex:none;opacity:.9}
+.nc-plat.on{background:var(--c-badge-on-bg);color:var(--c-badge-on-text)}
+.nc-plat.off{background:var(--c-badge-off-bg);color:var(--c-badge-off-text);border-color:var(--c-border)}
+.nc-plat.warn{background:var(--c-badge-off-bg);color:var(--c-warn);border-color:var(--c-warn)}
+.nc-plat:hover{border-color:var(--c-accent);background:var(--c-accent-soft);color:var(--c-accent-ink)}
+.nc-plat:active{transform:scale(.97)}
 .nc-pv a{color:var(--c-accent-ink);text-decoration:underline}
 .nc-pv hr{border:none;border-top:1px dashed var(--c-border);margin:6px 0}
 .nc-pv img{max-width:100%;max-height:150px;display:block;margin:8px 0;border-radius:4px;background:var(--c-progress-bg);min-height:24px}
@@ -729,102 +829,221 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .nc-pv-kids{margin-left:1.2em;border-left:2px solid var(--c-pv-border);padding-left:6px}
 .nc-mp{color:var(--c-accent-ink);font-weight:600;margin:8px 0;background:var(--c-accent-soft);padding:6px 10px;border-radius:4px}
 .nc-pi{position:relative;margin:4px 0}
-.nc-pd{position:absolute;top:2px;right:2px;width:24px;height:24px;background:var(--c-danger-solid);color:#fff;border:none;border-radius:50%;font-size:13px;line-height:24px;text-align:center;cursor:pointer;opacity:0;transition:opacity var(--dur-fast) var(--ease);z-index:2;pointer-events:auto}
+.nc-pd{position:absolute;top:2px;right:2px;width:22px;height:22px;display:flex;align-items:center;justify-content:center;background:var(--c-danger-solid);color:#fff;border:none;border-radius:var(--r-full);font-size:10px;line-height:1;padding:0;cursor:pointer;opacity:0;box-shadow:0 1px 4px rgba(0,0,0,.2);transition:opacity var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease);z-index:2;pointer-events:auto}
 .nc-pi:hover .nc-pd,.nc-pi:focus-within .nc-pd,.nc-pd:focus-visible{opacity:1}
-.nc-pd:active{transform:scale(.92)}
-.nc-ok{font-size:15px;color:var(--c-success);font-weight:600;text-align:center;margin:8px 0}
-.nc-err{font-size:13px;color:var(--c-err-text);background:var(--c-err-bg);border:1px solid var(--c-err-border);border-radius:8px;padding:12px;margin:8px 0;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.5}
-.nc-err-succ{font-size:13px;color:var(--c-err-succ-text);background:var(--c-err-succ-bg);border:1px solid var(--c-err-succ-border);border-radius:8px;padding:10px;margin:4px 0;line-height:1.5}
+.nc-pd:hover{background:var(--c-danger-solid-hover)}
+.nc-pd:active{transform:scale(.88)}
+@media (pointer:coarse){.nc-pd{opacity:.82;pointer-events:auto}}
+.nc-ok{font-size:var(--fs-lg);font-weight:650;color:var(--c-success);text-align:center;margin:var(--sp-2) 0;line-height:var(--lh-tight)}
+.nc-err{color:var(--c-err-text);background:var(--c-err-bg);border:1px solid var(--c-err-border);border-radius:var(--r-lg);padding:var(--sp-4);margin:var(--sp-2) 0;max-height:200px;overflow-y:auto;overscroll-behavior:contain;white-space:pre-wrap;word-break:normal;overflow-wrap:anywhere;line-height:1.6;font-family:var(--font-mono);font-size:var(--fs-sm);text-align:left}
+.nc-err-succ{font-size:var(--fs-base);color:var(--c-err-succ-text);background:var(--c-err-succ-bg);border:1px solid var(--c-err-succ-border);border-radius:var(--r-lg);padding:10px var(--sp-4);margin:var(--sp-1) 0;line-height:1.6}
 .nc-err-title{color:var(--c-danger)}
 .nc-err-title.is-warn{color:var(--c-warn)}
-.nc-tc{position:fixed;top:20px;right:20px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;pointer-events:none}
-.nc-t{padding:12px 20px;border-radius:6px;color:#fff;font-size:14px;box-shadow:var(--sh-float);pointer-events:auto;animation:nc-in .3s var(--ease);display:flex;align-items:center;gap:8px;max-width:300px;word-break:break-word}
+.nc-tc{position:fixed;top:20px;right:20px;z-index:2147483647;display:flex;flex-direction:column;gap:var(--sp-3);pointer-events:none;max-width:min(360px,calc(100vw - 40px))}
+.nc-t{padding:11px 16px;border-radius:var(--r-lg);color:#fff;font-size:var(--fs-md);font-weight:500;line-height:var(--lh-tight);box-shadow:var(--c-toast-shadow);pointer-events:auto;animation:nc-in .28s var(--ease-out);display:flex;align-items:flex-start;gap:var(--sp-3);word-break:break-word;overflow-wrap:anywhere}
 .nc-ts{background:var(--c-success-solid)}.nc-te{background:var(--c-danger-solid)}.nc-ti{background:var(--c-toast-info)}
-.nc-ts::before{content:'✓';font-weight:700;flex:none}
-.nc-te::before{content:'✕';font-weight:700;flex:none}
-.nc-ti::before{content:'ⓘ';font-weight:700;flex:none}
-.nc-info{font-size:12px;color:var(--c-help);text-align:right;margin-top:-8px}
-.nc-progress{margin-top:8px;height:6px;background:var(--c-progress-bg);border-radius:3px;overflow:hidden;display:none}
-.nc-progress-bar{height:100%;background:var(--c-accent);border-radius:3px;transition:width .3s var(--ease);width:0}
-.nc-shortcuts{font-size:12px;color:var(--c-help);margin-top:4px;line-height:1.6}
-.nc-shortcuts kbd{background:var(--c-kbd-bg);border:1px solid var(--c-kbd-border);border-radius:3px;padding:1px 5px;font-size:11px;font-family:monospace}
-.nc-dirty{font-size:12px;color:var(--c-warn);margin-top:4px;display:none}
-.nc-h3r{display:flex;align-items:center;gap:6px}
-.nc-hist{margin-top:6px;display:flex;flex-direction:column;gap:4px}
-.nc-hist-item{display:flex;align-items:baseline;gap:8px;font-size:12px;line-height:1.5}
-.nc-hist-time{color:var(--c-help);flex:none;font-family:monospace;font-size:12px}
-.nc-hist-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nc-hist-plat{margin-left:auto;flex:none;color:var(--c-accent-ink)}
-.nc-hist-empty{font-size:12px;color:var(--c-help);text-align:center;padding:18px 10px;border:1px dashed var(--c-border);border-radius:6px}
-.nc-empty{padding:30px 12px;text-align:center;color:var(--c-help);font-size:12px}
-.nc-empty b{display:block;font-weight:600;color:var(--c-text-sec);font-size:13px;margin-bottom:4px}
-.nc-tb{padding:3px 10px;font-size:12px;border:1px solid var(--c-btn-ghost-border);background:var(--c-btn-ghost-bg);color:var(--c-btn-ghost-text);border-radius:4px;cursor:pointer;font-weight:600;transition:filter var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
-.nc-tb:hover{filter:brightness(.95);background:var(--c-accent-soft)}
-.nc-tb:active{transform:scale(.96)}
+.nc-ts::before,.nc-te::before,.nc-ti::before{flex:none;width:17px;height:17px;margin-top:1px;border-radius:var(--r-full);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;line-height:1;background:rgba(255,255,255,.22)}
+.nc-ts::before{content:'✓'}
+.nc-te::before{content:'✕'}
+.nc-ti::before{content:'i'}
+.nc-info{font-size:var(--fs-sm);color:var(--c-help);text-align:right;margin-top:-4px;line-height:1.5}
+.nc-progress{margin-top:var(--sp-2);height:7px;background:var(--c-progress-bg);border-radius:var(--r-full);overflow:hidden;display:none;box-shadow:inset 0 1px 2px rgba(0,0,0,.08)}
+.nc-progress-bar{position:relative;height:100%;background:linear-gradient(90deg,var(--c-accent),var(--c-accent-hover));border-radius:var(--r-full);transition:width var(--dur-slow) var(--ease-out);width:0;overflow:hidden}
+.nc-progress-bar::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.38),transparent);animation:nc-shimmer 1.3s linear infinite}
+@keyframes nc-shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.nc-shortcuts{margin-top:var(--sp-3);padding:var(--sp-3) var(--sp-4);background:var(--c-surface-sunken);border:1px solid var(--c-border);border-radius:var(--r-lg);font-size:var(--fs-sm);color:var(--c-help);line-height:1.95}
+.nc-shortcuts strong{display:block;color:var(--c-text-sec);font-size:var(--fs-sm);font-weight:650;margin-bottom:2px}
+.nc-shortcuts kbd{display:inline-block;min-width:18px;text-align:center;background:var(--c-bg);border:1px solid var(--c-kbd-border);border-bottom-width:2px;border-radius:var(--r-xs);padding:1px 5px;margin:0 1px;font-size:var(--fs-xs);font-family:var(--font-mono);color:var(--c-text-sec);font-weight:600}
+.nc-shortcuts kbd+kbd{margin-left:2px}
+.nc-dirty{font-size:var(--fs-sm);color:var(--c-warn);margin-top:var(--sp-1);font-weight:650;display:none}
+.nc-h3r{display:flex;align-items:center;gap:var(--sp-3);flex:none}
+.nc-hist{margin-top:var(--sp-2);display:flex;flex-direction:column;gap:2px}
+.nc-hist-item{display:flex;align-items:baseline;gap:var(--sp-3);font-size:var(--fs-sm);line-height:1.6;padding:4px 8px;border-radius:var(--r-sm);transition:background var(--dur-fast) var(--ease)}
+.nc-hist-item:hover{background:var(--c-bg-sec)}
+.nc-hist-time{color:var(--c-help);flex:none;font-family:var(--font-mono);font-size:var(--fs-xs);font-variant-numeric:tabular-nums}
+.nc-hist-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-text-sec)}
+.nc-hist-plat{margin-left:auto;flex:none;color:var(--c-accent-ink);font-weight:600}
+.nc-hist-empty{font-size:var(--fs-sm);color:var(--c-help);text-align:center;padding:var(--sp-5) 10px;border:1px dashed var(--c-border);border-radius:var(--r-md);line-height:1.6}
+.nc-empty{padding:var(--sp-7) var(--sp-4);text-align:center;color:var(--c-help);font-size:var(--fs-sm)}
+.nc-empty b{display:block;font-weight:650;color:var(--c-text-sec);font-size:var(--fs-md);margin-bottom:var(--sp-1)}
+.nc-tb{padding:4px 10px;font-size:var(--fs-sm);border:1px solid var(--c-btn-ghost-border);background:var(--c-btn-ghost-bg);color:var(--c-btn-ghost-text);border-radius:var(--r-sm);cursor:pointer;font-weight:600;line-height:1.5;white-space:nowrap;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease)}
+.nc-tb:hover{background:var(--c-accent-soft);border-color:var(--c-accent)}
+.nc-tb:active{transform:scale(.95)}
+.nc-tb:disabled{background:var(--c-btn-disabled-bg);color:var(--c-btn-disabled-text);border-color:var(--c-border);cursor:not-allowed;transform:none}
 @keyframes nc-in{from{opacity:0;transform:translateX(50px)}to{opacity:1;transform:translateX(0)}}
-@media (pointer:coarse){.nc-tb{min-height:28px;padding:5px 12px}.nc-min{padding:6px 10px}.nc-tv{padding:8px}}
-@media (max-width:520px){.nc-ov.nc-ov-tr{align-items:flex-end;justify-content:center;padding:10px}.nc-ov.nc-ov-tr .nc-modal{width:100%;max-width:none;max-height:70vh}.nc-modal{padding:18px;gap:12px}.nc-modal h3{margin-top:12px}.nc-tc{left:10px;right:10px;top:10px}.nc-t{max-width:none}}
-@media (prefers-reduced-motion:reduce){*{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}}
-@media (prefers-color-scheme: dark) {
- :host{--c-bg:#1e1e1e;--c-text:#e0e0e0;--c-text-sec:#bbb;--c-border:#444;--c-border-hover:#5a5a5a;--c-input-bg:#2a2a2a;--c-bg-sec:#333;--c-pv-bg:#2a2a2a;--c-pv-text:#ddd;--c-pv-border:#444;--c-code-bg:#333;--c-th-bg:#383838;--c-td-border:#555;--c-btn-sec-bg:#333;--c-btn-sec-text:#e0e0e0;--c-btn-ghost-bg:#1e1e1e;--c-btn-ghost-text:#5b9fe6;--c-btn-ghost-border:#5b9fe6;--c-help:#9a9a9a;--c-kbd-bg:#333;--c-kbd-border:#555;--c-progress-bg:#444;--c-err-bg:#3a1a1a;--c-err-border:#5c2828;--c-err-text:#ff6b6b;--c-err-succ-bg:#1a3a1a;--c-err-succ-border:#2d5c2d;--c-err-succ-text:#6bdf6b;--c-accent:#5b9fe6;--c-accent-hover:#4a8ed5;--c-accent-strong:#5b9fe6;--c-accent-ink:#5b9fe6;--c-toast-info:#b45309;--c-ring:rgba(91,159,230,.2);--c-success:#6bdf6b;--c-success-solid:#2d7d46;--c-danger:#ff6b6b;--c-danger-solid:#b71c1c;--c-danger-solid-hover:#8e1414;--c-warn:#f0a860;--c-accent-soft:#243447;--c-hl-fill:rgba(91,159,230,.16);--c-hl-inner:rgba(255,255,255,.35);--c-hl-ring:rgba(91,159,230,.28);--c-focus-ring:rgba(91,159,230,.5);--c-scrim:rgba(0,0,0,.72);--c-tip-bg:rgba(0,0,0,.88);--c-tip-text:#fff;--c-placeholder:#9a9a9a;--c-btn-disabled-bg:#2f2f2f;--c-btn-disabled-text:#9a9a9a;--c-brand-fs:#5b95ff;--c-brand-obs:#a78bfa;--sh-float:0 4px 12px rgba(0,0,0,.45);--sh-modal:0 24px 48px rgba(0,0,0,.55),0 4px 12px rgba(0,0,0,.35);--dur-fast:.15s;--dur-base:.2s;--ease:cubic-bezier(.2,0,.2,1)}
- .nc-b1{color:#0d2137}
+@media (pointer:coarse){.nc-tb{min-height:28px;padding:5px 12px}.nc-min{width:32px;height:32px}.nc-tv{width:32px;height:32px}.nc-pd{width:28px;height:28px;font-size:12px}.nc-b{min-height:38px}.nc-b-sm{min-height:32px}}
+@media (max-width:760px){.nc-modal{width:min(560px,94vw)}}
+/* 窄屏无横向空间放标签栏：降级为手风琴，同一份 DOM 由 CSS 切换呈现，JS 只维护 open 态 */
+@media (max-width:600px){
+ .nc-set{overflow-y:auto}
+ .nc-set-body{display:block;overflow:visible}
+ .nc-nav{display:none}
+ .nc-panes{overflow:visible}
+ .nc-pane{display:flex}
+ .nc-pane.active{animation:none}
+ .nc-pane-hd{display:flex;align-items:center;gap:8px;width:100%;margin-top:var(--sp-4);padding:10px 12px;border:1px solid var(--c-border);border-radius:var(--r-md);background:var(--c-surface-sunken);color:var(--c-text);font-family:inherit;font-size:var(--fs-md);font-weight:650;line-height:var(--lh-tight);text-align:left;cursor:pointer;transition:background var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease)}
+ .nc-pane-hd:hover{background:var(--c-bg-sec);border-color:var(--c-border-hover)}
+ .nc-panes > .nc-pane:first-child > .nc-pane-hd{margin-top:0}
+ .nc-caret{margin-left:auto;flex:none;font-size:11px;color:var(--c-help);transition:transform var(--dur-base) var(--ease)}
+ .nc-pane.open > .nc-pane-hd .nc-caret{transform:rotate(180deg)}
+ .nc-pane:not(.open) > *:not(.nc-pane-hd){display:none}
+ .nc-pane > .nc-sec{margin-top:var(--sp-3)}
 }
+@media (max-width:520px){.nc-ov.nc-ov-tr{align-items:flex-end;justify-content:center;padding:10px}.nc-ov.nc-ov-tr .nc-modal{width:100%;max-width:none;max-height:74vh}.nc-modal{padding:var(--sp-5);gap:var(--sp-3)}.nc-modal:not(.minimized) h2::before{top:-18px;height:18px}.nc-sec{padding:var(--sp-3);margin-top:var(--sp-3)}.nc-pv.expanded{max-height:50vh}.nc-tc{left:10px;right:10px;top:10px;max-width:none}.nc-t{max-width:none}.nc-btn{right:14px;bottom:14px}}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}.nc-progress-bar::after{display:none}.nc-btn:hover{transform:none}.nc-btn-ico{transform:none}}
+@media (prefers-contrast:more){:host(:not([data-theme=dark])){--c-border:#767676;--c-border-hover:#333;--c-help:#595959;--c-text-sec:#3d3d3d}:host([data-theme=dark]){--c-border:#8f8f8f;--c-border-hover:#b5b5b5;--c-help:#c9c9c9;--c-text-sec:#d8d8d8}.nc-bk{border-width:2px}.nc-sec{border-width:1.5px}.nc-modal{box-shadow:var(--sh-modal),0 0 0 1px rgba(0,0,0,.5)}}
+:host([data-theme=light]){color-scheme:light}
+:host([data-theme=dark]){color-scheme:dark}
+/* 手动指定主题时接管系统偏好：light 屏蔽系统深色分支，dark 在无媒体查询命中的系统浅色下独立生效 */
+@media (prefers-color-scheme: dark) {
+ :host(:not([data-theme=light])){${DARK_VARS}}
+ :host(:not([data-theme=light])) .nc-b1{color:#0d2137}
+}
+:host([data-theme=dark]){${DARK_VARS}}
+:host([data-theme=dark]) .nc-b1{color:#0d2137}
 `;
 
  const PANEL_HTML = `
 
-<button class="nc-btn" title="左键选取 / 右键设置 / Alt+Shift+N">✂️</button>
-<div class="nc-tip">🔍 悬停高亮元素，单击提取内容 (Esc取消)</div>
+<button class="nc-btn" type="button" title="左键选取 · 右键设置 · Alt+Shift+N" aria-label="网页剪藏：左键选取，右键打开设置，快捷键 Alt+Shift+N">
+<svg class="nc-btn-ico" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>
+<span class="nc-btn-badge" id="btn-badge" aria-hidden="true" hidden></span>
+</button>
+<div class="nc-tip" role="status" aria-live="polite">🔍 悬停高亮元素，单击提取内容 (Esc取消)</div>
 <div class="nc-mask"></div><div class="nc-hl"></div>
-<div class="nc-ov" id="ov-set" role="dialog" aria-modal="true" aria-labelledby="ttl-set"><div class="nc-modal">
+<div class="nc-ov" id="ov-set" role="dialog" aria-modal="true" aria-labelledby="ttl-set"><div class="nc-modal nc-set">
  <h2 id="ttl-set">⚙️ Notion / 飞书 / Obsidian 配置</h2>
- <label for="in-blocklist">🚫 禁用站点（逗号分隔，命中则本脚本不启用）</label><input type="text" id="in-blocklist" placeholder="example.com, *.example.org" autocomplete="off">
- <div class="nc-help">支持 example.com（含子域）与 *.example.com（仅子域）。保存后刷新页面生效。</div>
- <label for="in-send-profile">🚦 发送节奏</label><select id="in-send-profile"><option value="gentle">温和 · 降低并发（推荐，规避平台接口限流）</option><option value="standard">标准 · 更快</option></select>
- <div class="nc-help">温和档：三平台错峰启动 700ms · 图片下载并发 2 · API 写入间隔 550ms；标准档：300ms / 3 / 350ms。</div>
- <h3><span>📕 Notion</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-notion"> 启用</label><button class="nc-tb" id="btn-test-notion" title="验证 Token 与数据库连通性（读取当前表单值，无需先保存）">🔌 测试</button></span></h3>
- <label for="in-tok">Integration Token</label><div class="nc-tw"><input type="password" id="in-tok" placeholder="secret_... 或 ntn_..." autocomplete="new-password"><button class="nc-tv nc-tv-notion" type="button" aria-label="显示或隐藏 Notion Token" title="显示/隐藏">👁️</button></div>
- <label for="in-db">Database ID</label><input type="text" id="in-db" placeholder="32 位 ID 或数据库链接" autocomplete="off">
- <div class="nc-help">⚠️ 必须在 Notion 数据库 Connections 中添加 Integration。</div>
- <label for="in-tag">标签属性名 (可选)</label><input type="text" id="in-tag" placeholder="Tags" autocomplete="off">
- <h3><span>🪁 飞书</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-feishu"> 启用</label><button class="nc-tb" id="btn-test-feishu" title="验证凭证 + 创建/回收测试文档（读取当前表单值）">🔌 测试</button></span></h3>
- <label for="in-fs-appid">App ID</label><input type="text" id="in-fs-appid" placeholder="App ID" autocomplete="off">
- <label for="in-fs-secret">App Secret</label><div class="nc-tw"><input type="password" id="in-fs-secret" placeholder="App Secret" autocomplete="new-password"><button class="nc-tv nc-tv-fs" type="button" aria-label="显示或隐藏飞书 App Secret" title="显示/隐藏">👁️</button></div>
- <label for="in-fs-folder">文件夹 Token</label><input type="text" id="in-fs-folder" placeholder="Folder Token" autocomplete="off">
- <div class="nc-help">⚠️ Token 明文存储于本地，请勿在公共电脑保存。</div>
- <h3><span>💎 Obsidian</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-obsidian"> 启用</label><button class="nc-tb" id="btn-test-obsidian" title="探测 Local REST API 连通性与 API Key（读取当前表单值）">🔌 测试</button></span></h3>
- <label for="in-obs-api-url">API Base URL</label><input type="text" id="in-obs-api-url" placeholder="http://127.0.0.1:27123" autocomplete="off">
- <label for="in-obs-api-key">API Key</label><div class="nc-tw"><input type="password" id="in-obs-api-key" placeholder="Local REST API 插件中获取" autocomplete="new-password"><button class="nc-tv nc-tv-obs" type="button" aria-label="显示或隐藏 Obsidian API Key" title="显示/隐藏">👁️</button></div>
- <label for="in-obs-folder">保存路径</label><input type="text" id="in-obs-folder" placeholder="例如: Clippings" autocomplete="off">
- <div class="nc-help">💡 需安装 <b>Local REST API</b> 插件并启用 HTTP 端口(27123)。<br>💡 写入采用串行队列 + 自动重试；失败后可在弹窗中一键复制 Markdown 或重试。</div>
- <div class="nc-row"><button class="nc-tb" id="btn-testall" title="按顺序逐个测试已配置平台（读取当前表单值，无需先保存）；未配置的平台自动跳过并汇总">🔌 测试全部</button></div>
- <h3><span>🏷️ 域名默认标签</span></h3>
- <textarea id="in-domain-tags" rows="3" aria-label="域名默认标签（每行一条：域名=标签1,标签2）" placeholder="每行一条：域名=标签1,标签2&#10;zhihu.com=阅读,知乎&#10;github.com=代码"></textarea>
- <div class="nc-help">发送前按当前站点域名（含子域）自动预填标签；手动输入优先于自动预填。</div>
- <h3><span>💾 配置备份</span><span class="nc-h3r"><button class="nc-tb" id="btn-exp" title="将全部配置导出为 JSON 文件下载">导出</button><button class="nc-tb" id="btn-imp" title="从 JSON 文件导入配置到当前表单">导入</button></span></h3>
- <div class="nc-help">脚本配置按站点独立存储，多站点使用时可用此功能同步。导出文件含 Token 明文请妥善保管；导入仅回填表单，核对后需点击「保存设置」生效。</div>
- <input type="file" id="in-imp-file" accept=".json,application/json" style="display:none">
- <h3><span>🕘 最近发送</span><span class="nc-h3r"><button class="nc-tb" id="btn-hist-clear" title="清空全部本地发送历史">清空</button></span></h3>
- <div class="nc-hist" id="hist-list"></div>
- <div class="nc-shortcuts"><strong>快捷键</strong><br>🖱️ 左键拖拽 · 右键设置 · Alt+Shift+N 选取<br>⌨️ Esc 取消 · ↑/↓ 调整选取范围 · Ctrl+Enter 发送 · Ctrl+A 全选</div>
+ <div class="nc-set-body">
+  <nav class="nc-nav" id="set-nav" role="tablist" aria-label="设置分区" aria-orientation="vertical">
+   <button class="nc-nav-i" type="button" role="tab" id="nav-general" data-tab="general" aria-controls="tab-general" aria-selected="true"><span class="nc-nav-ico">🧭</span><span class="nc-nav-t">通用</span></button>
+   <button class="nc-nav-i" type="button" role="tab" id="nav-notion" data-tab="notion" aria-controls="tab-notion" aria-selected="false" tabindex="-1"><span class="nc-nav-ico">📕</span><span class="nc-nav-t">Notion</span><i class="nc-dot"></i></button>
+   <button class="nc-nav-i" type="button" role="tab" id="nav-feishu" data-tab="feishu" aria-controls="tab-feishu" aria-selected="false" tabindex="-1"><span class="nc-nav-ico">🪁</span><span class="nc-nav-t">飞书</span><i class="nc-dot"></i></button>
+   <button class="nc-nav-i" type="button" role="tab" id="nav-obsidian" data-tab="obsidian" aria-controls="tab-obsidian" aria-selected="false" tabindex="-1"><span class="nc-nav-ico">💎</span><span class="nc-nav-t">Obsidian</span><i class="nc-dot"></i></button>
+   <button class="nc-nav-i" type="button" role="tab" id="nav-tags" data-tab="tags" aria-controls="tab-tags" aria-selected="false" tabindex="-1"><span class="nc-nav-ico">🏷️</span><span class="nc-nav-t">标签</span></button>
+   <button class="nc-nav-i" type="button" role="tab" id="nav-backup" data-tab="backup" aria-controls="tab-backup" aria-selected="false" tabindex="-1"><span class="nc-nav-ico">💾</span><span class="nc-nav-t">备份</span></button>
+   <button class="nc-nav-i" type="button" role="tab" id="nav-hist" data-tab="hist" aria-controls="tab-hist" aria-selected="false" tabindex="-1"><span class="nc-nav-ico">🕘</span><span class="nc-nav-t">历史</span></button>
+   <button class="nc-nav-i" type="button" role="tab" id="nav-keys" data-tab="keys" aria-controls="tab-keys" aria-selected="false" tabindex="-1"><span class="nc-nav-ico">⌨️</span><span class="nc-nav-t">快捷键</span></button>
+  </nav>
+  <div class="nc-panes" id="set-panes">
+   <div class="nc-pane" id="tab-general" role="tabpanel" aria-labelledby="nav-general">
+    <button class="nc-pane-hd" type="button" data-pane-hd="general" aria-expanded="true" aria-controls="tab-general"><span class="nc-nav-ico">🧭</span><span>通用</span><span class="nc-caret">▼</span></button>
+    <section class="nc-sec" id="sec-general">
+     <h3><span class="nc-plat-hd">🧭 通用</span></h3>
+     <label for="in-theme">🎨 界面主题</label><select id="in-theme"><option value="auto">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
+     <div class="nc-help">默认跟随系统深色模式；手动指定浅色 / 深色后将忽略系统设置。保存后立即生效，无需刷新。</div>
+     <label for="in-blocklist">🚫 禁用站点（逗号分隔，命中则本脚本不启用）</label><input type="text" id="in-blocklist" placeholder="example.com, *.example.org" autocomplete="off">
+     <div class="nc-help">支持 example.com（含子域）与 *.example.com（仅子域）。保存后刷新页面生效。</div>
+     <label for="in-send-profile">🚦 发送节奏</label><select id="in-send-profile"><option value="gentle">温和 · 降低并发（推荐，规避平台接口限流）</option><option value="standard">标准 · 更快</option></select>
+     <div class="nc-help">温和档：三平台错峰启动 700ms · 图片下载并发 2 · API 写入间隔 550ms；标准档：300ms / 3 / 350ms。</div>
+    </section>
+   </div>
+   <div class="nc-pane" id="tab-notion" role="tabpanel" aria-labelledby="nav-notion">
+    <button class="nc-pane-hd" type="button" data-pane-hd="notion" aria-expanded="false" aria-controls="tab-notion"><span class="nc-nav-ico">📕</span><span>Notion</span><i class="nc-dot"></i><span class="nc-caret">▼</span></button>
+    <section class="nc-sec" id="sec-notion" data-plat="notion">
+     <h3><span class="nc-plat-hd"><i class="nc-dot"></i>📕 Notion</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-notion"> 启用</label><button class="nc-tb" id="btn-test-notion" title="验证 Token 与数据库连通性（读取当前表单值，无需先保存）">🔌 测试</button></span></h3>
+     <label for="in-tok">Integration Token</label><div class="nc-tw"><input type="password" id="in-tok" placeholder="secret_... 或 ntn_..." autocomplete="new-password"><button class="nc-tv nc-tv-notion" type="button" aria-label="显示或隐藏 Notion Token" title="显示/隐藏">👁️</button></div>
+     <label for="in-db">Database ID</label><input type="text" id="in-db" placeholder="32 位 ID 或数据库链接" autocomplete="off">
+     <div class="nc-help">⚠️ 必须在 Notion 数据库 Connections 中添加 Integration。</div>
+     <div class="nc-warn-hint">⚠️ 已启用但 Token 或 Database ID 未填全，发送时该平台会被跳过。</div>
+     <label for="in-tag">标签属性名 (可选)</label><input type="text" id="in-tag" placeholder="Tags" autocomplete="off">
+    </section>
+   </div>
+   <div class="nc-pane" id="tab-feishu" role="tabpanel" aria-labelledby="nav-feishu">
+    <button class="nc-pane-hd" type="button" data-pane-hd="feishu" aria-expanded="false" aria-controls="tab-feishu"><span class="nc-nav-ico">🪁</span><span>飞书</span><i class="nc-dot"></i><span class="nc-caret">▼</span></button>
+    <section class="nc-sec" id="sec-feishu" data-plat="feishu">
+     <h3><span class="nc-plat-hd"><i class="nc-dot"></i>🪁 飞书</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-feishu"> 启用</label><button class="nc-tb" id="btn-test-feishu" title="验证凭证 + 创建/回收测试文档（读取当前表单值）">🔌 测试</button></span></h3>
+     <label for="in-fs-appid">App ID</label><input type="text" id="in-fs-appid" placeholder="App ID" autocomplete="off">
+     <label for="in-fs-secret">App Secret</label><div class="nc-tw"><input type="password" id="in-fs-secret" placeholder="App Secret" autocomplete="new-password"><button class="nc-tv nc-tv-fs" type="button" aria-label="显示或隐藏飞书 App Secret" title="显示/隐藏">👁️</button></div>
+     <label for="in-fs-folder">文件夹 Token</label><input type="text" id="in-fs-folder" placeholder="Folder Token" autocomplete="off">
+     <div class="nc-help">⚠️ Token 明文存储于本地，请勿在公共电脑保存。</div>
+     <div class="nc-warn-hint">⚠️ 已启用但 App ID 或 App Secret 未填全，发送时该平台会被跳过。</div>
+    </section>
+   </div>
+   <div class="nc-pane" id="tab-obsidian" role="tabpanel" aria-labelledby="nav-obsidian">
+    <button class="nc-pane-hd" type="button" data-pane-hd="obsidian" aria-expanded="false" aria-controls="tab-obsidian"><span class="nc-nav-ico">💎</span><span>Obsidian</span><i class="nc-dot"></i><span class="nc-caret">▼</span></button>
+    <section class="nc-sec" id="sec-obsidian" data-plat="obsidian">
+     <h3><span class="nc-plat-hd"><i class="nc-dot"></i>💎 Obsidian</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-obsidian"> 启用</label><button class="nc-tb" id="btn-test-obsidian" title="探测 Local REST API 连通性与 API Key（读取当前表单值）">🔌 测试</button></span></h3>
+     <label for="in-obs-api-url">API Base URL</label><input type="text" id="in-obs-api-url" placeholder="http://127.0.0.1:27123" autocomplete="off">
+     <label for="in-obs-api-key">API Key</label><div class="nc-tw"><input type="password" id="in-obs-api-key" placeholder="Local REST API 插件中获取" autocomplete="new-password"><button class="nc-tv nc-tv-obs" type="button" aria-label="显示或隐藏 Obsidian API Key" title="显示/隐藏">👁️</button></div>
+     <label for="in-obs-folder">保存路径</label><input type="text" id="in-obs-folder" placeholder="例如: Clippings" autocomplete="off">
+     <div class="nc-help">💡 需安装 <b>Local REST API</b> 插件并启用 HTTP 端口(27123)。<br>💡 写入采用串行队列 + 自动重试；失败后可在弹窗中一键复制 Markdown 或重试。</div>
+     <div class="nc-warn-hint">⚠️ 已启用但 API Key 未填写，发送时该平台会连接失败。</div>
+    </section>
+    <div class="nc-row"><button class="nc-tb" id="btn-testall" title="按顺序逐个测试已配置平台（读取当前表单值，无需先保存）；未配置的平台自动跳过并汇总">🔌 测试全部平台连通性</button></div>
+   </div>
+   <div class="nc-pane" id="tab-tags" role="tabpanel" aria-labelledby="nav-tags">
+    <button class="nc-pane-hd" type="button" data-pane-hd="tags" aria-expanded="false" aria-controls="tab-tags"><span class="nc-nav-ico">🏷️</span><span>域名默认标签</span><span class="nc-caret">▼</span></button>
+    <section class="nc-sec" id="sec-tags">
+     <h3><span class="nc-plat-hd">🏷️ 域名默认标签</span></h3>
+     <textarea id="in-domain-tags" rows="3" aria-label="域名默认标签（每行一条：域名=标签1,标签2）" placeholder="每行一条：域名=标签1,标签2&#10;zhihu.com=阅读,知乎&#10;github.com=代码"></textarea>
+     <div class="nc-help">发送前按当前站点域名（含子域）自动预填标签；手动输入优先于自动预填。</div>
+    </section>
+   </div>
+   <div class="nc-pane" id="tab-backup" role="tabpanel" aria-labelledby="nav-backup">
+    <button class="nc-pane-hd" type="button" data-pane-hd="backup" aria-expanded="false" aria-controls="tab-backup"><span class="nc-nav-ico">💾</span><span>配置备份</span><span class="nc-caret">▼</span></button>
+    <section class="nc-sec" id="sec-backup">
+     <h3><span class="nc-plat-hd">💾 配置备份</span><span class="nc-h3r"><button class="nc-tb" id="btn-exp" title="将全部配置导出为 JSON 文件下载">导出</button><button class="nc-tb" id="btn-imp" title="从 JSON 文件导入配置到当前表单">导入</button></span></h3>
+     <div class="nc-help">脚本配置按站点独立存储，多站点使用时可用此功能同步。导出文件含 Token 明文请妥善保管；导入仅回填表单，核对后需点击「保存设置」生效。</div>
+     <input type="file" id="in-imp-file" accept=".json,application/json" style="display:none">
+    </section>
+   </div>
+   <div class="nc-pane" id="tab-hist" role="tabpanel" aria-labelledby="nav-hist">
+    <button class="nc-pane-hd" type="button" data-pane-hd="hist" aria-expanded="false" aria-controls="tab-hist"><span class="nc-nav-ico">🕘</span><span>最近发送</span><span class="nc-caret">▼</span></button>
+    <section class="nc-sec" id="sec-hist">
+     <h3><span class="nc-plat-hd">🕘 最近发送</span><span class="nc-h3r"><button class="nc-tb" id="btn-hist-clear" title="清空全部本地发送历史">清空</button></span></h3>
+     <div class="nc-hist" id="hist-list"></div>
+    </section>
+   </div>
+   <div class="nc-pane" id="tab-keys" role="tabpanel" aria-labelledby="nav-keys">
+    <button class="nc-pane-hd" type="button" data-pane-hd="keys" aria-expanded="false" aria-controls="tab-keys"><span class="nc-nav-ico">⌨️</span><span>快捷键</span><span class="nc-caret">▼</span></button>
+    <section class="nc-sec" id="sec-keys">
+     <h3><span class="nc-plat-hd">⌨️ 快捷键</span></h3>
+     <div class="nc-shortcuts">
+      <strong>选取阶段</strong>
+      🖱️ <kbd>左键</kbd> 单击提取 · <kbd>右键</kbd> 单击悬浮球打开设置<br>
+      <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> 开始选取 · <kbd>↑</kbd>/<kbd>↓</kbd> 调整选取范围 · <kbd>Esc</kbd> 取消
+      <strong>确认面板</strong>
+      <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 发送 · <kbd>Ctrl</kbd>+<kbd>A</kbd> 全选预览内容
+     </div>
+    </section>
+   </div>
+  </div>
+ </div>
  <div class="nc-dirty" id="dirty-flag">⚠️ 有未保存的更改</div>
  <div class="nc-row"><button class="nc-b nc-b2" id="btn-sc">关闭</button><button class="nc-b nc-b1" id="btn-ss">保存设置</button></div>
 </div></div>
 <div class="nc-ov nc-ov-tr" id="ov-cfm" role="dialog" aria-modal="true" aria-labelledby="ttl-cfm"><div class="nc-modal" id="modal-cfm">
  <h2 class="nc-modal-h2"><span id="ttl-cfm">✂️ 确认发送</span><button class="nc-min" id="btn-min" type="button" aria-label="最小化确认发送面板" title="最小化">🔽</button></h2>
+ <div class="nc-plats" id="plat-badges" role="group" aria-label="发送目标平台，点击前往设置调整"></div>
  <label for="in-title">页面标题</label><input type="text" id="in-title" autocomplete="off">
- <label id="lb-pv">内容预览</label><div class="nc-pv" id="pv" tabindex="0" role="region" aria-labelledby="lb-pv"></div><div class="nc-info" id="pv-count"></div>
+ <div class="nc-pv-head"><label id="lb-pv">内容预览</label><span class="nc-info" id="pv-count"></span><button class="nc-tb" id="pv-expand" type="button" aria-expanded="false" aria-controls="pv" title="展开 / 收起预览区域">展开</button></div>
+ <div class="nc-pv" id="pv" tabindex="0" role="region" aria-labelledby="lb-pv"></div>
  <div class="nc-progress" id="pg" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="nc-progress-bar" id="pg-bar"></div></div><div class="nc-info" id="pg-text" role="status" style="display:none"></div>
  <label for="in-tags">标签 (逗号分隔)</label><input type="text" id="in-tags" placeholder="阅读, 技术" autocomplete="off">
- <div class="nc-row"><button class="nc-b nc-bk" id="btn-back">↩ 重选</button><button class="nc-b nc-b2" id="btn-add" title="返回页面继续选取，追加到当前内容末尾">➕ 追加</button><button class="nc-b nc-b2" id="btn-copy">📋 复制</button><button class="nc-b nc-b2" id="btn-cmd" title="复制整篇剪藏为 Markdown（含 frontmatter）">📄 复制 MD</button><span style="flex:1"></span><button class="nc-b nc-b2" id="btn-cc">取消</button><button class="nc-b nc-b1" id="btn-cs">发送</button></div>
+ <div class="nc-row">
+  <button class="nc-b nc-bk nc-b-sm" id="btn-back" title="放弃当前内容，返回页面重新选取">↩ 重选</button>
+  <button class="nc-b nc-bk nc-b-sm" id="btn-add" title="返回页面继续选取，追加到当前内容末尾">➕ 追加</button>
+  <span class="nc-sep"></span>
+  <button class="nc-b nc-bk nc-b-sm" id="btn-copy" title="复制为纯文本">📋 复制</button>
+  <button class="nc-b nc-bk nc-b-sm" id="btn-cmd" title="复制整篇剪藏为 Markdown（含 frontmatter）">📄 MD</button>
+  <span class="nc-grow"></span>
+  <button class="nc-b nc-b2" id="btn-cc">取消</button>
+  <button class="nc-b nc-b1" id="btn-cs">发送</button>
+ </div>
 </div></div>
-<div class="nc-ov nc-ov-tr" id="ov-ok" role="dialog" aria-modal="true" aria-labelledby="ttl-ok"><div class="nc-modal" style="text-align:center;gap:16px">
+<div class="nc-ov nc-ov-tr" id="ov-ok" role="dialog" aria-modal="true" aria-labelledby="ttl-ok"><div class="nc-modal" style="text-align:center;gap:var(--sp-4)">
  <h2 id="ttl-ok">✅ 发送完成！</h2><p class="nc-ok" id="ok-msg" role="status"></p>
- <div class="nc-row" style="justify-content:center;flex-wrap:wrap"><button class="nc-b nc-b1" id="btn-oo-notion" style="display:none">打开 Notion</button><button class="nc-b nc-bk nc-bk-brand-fs" id="btn-oo-feishu" style="display:none">打开飞书</button><button class="nc-b nc-bk nc-bk-brand-obs" id="btn-oo-obsidian" style="display:none">打开 Obsidian</button><button class="nc-b nc-b2" id="btn-oc">关闭</button></div>
+ <div class="nc-info" id="ok-tip" style="text-align:center;display:none"></div>
+ <div class="nc-row" style="justify-content:center"><button class="nc-b nc-b1" id="btn-oo-notion" style="display:none">打开 Notion</button><button class="nc-b nc-bk nc-bk-brand-fs" id="btn-oo-feishu" style="display:none">打开飞书</button><button class="nc-b nc-bk nc-bk-brand-obs" id="btn-oo-obsidian" style="display:none">打开 Obsidian</button><button class="nc-b nc-b2" id="btn-oc">关闭</button></div>
 </div></div>
-<div class="nc-ov nc-ov-tr" id="ov-err" role="dialog" aria-modal="true" aria-labelledby="err-title"><div class="nc-modal" style="text-align:center;gap:12px">
+<div class="nc-ov nc-ov-tr" id="ov-err" role="dialog" aria-modal="true" aria-labelledby="err-title"><div class="nc-modal" style="text-align:center;gap:var(--sp-3)">
  <h2 id="err-title" class="nc-err-title">❌ 发送失败</h2><div class="nc-err-succ" id="err-succ" style="display:none"></div><div class="nc-err" id="err-detail"></div>
- <div class="nc-row" style="justify-content:center;flex-wrap:wrap"><button class="nc-b nc-br" id="btn-retry">🔄 重试</button><button class="nc-b nc-b2" id="btn-err-md" style="display:none">📋 复制 Markdown</button><button class="nc-b nc-b2" id="btn-err-copy">📋 复制错误</button><button class="nc-b nc-b2" id="btn-err-close">关闭</button></div>
+ <div class="nc-row" style="justify-content:center"><button class="nc-b nc-br" id="btn-retry">🔄 重试</button><button class="nc-b nc-b2" id="btn-err-md" style="display:none">📋 复制 Markdown</button><button class="nc-b nc-b2" id="btn-err-copy">📋 复制错误</button><button class="nc-b nc-b2" id="btn-err-close">关闭</button></div>
+</div></div>
+<div class="nc-ov" id="ov-ask" role="dialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-msg"><div class="nc-modal" id="modal-ask" style="width:420px">
+ <h2 id="ask-title">请确认</h2>
+ <div class="nc-ask-msg" id="ask-msg"></div>
+ <div class="nc-row"><button class="nc-b nc-b2" id="ask-no">取消</button><button class="nc-b nc-b1" id="ask-yes">确定</button></div>
 </div></div>
 <div class="nc-tc" id="tc" role="status" aria-live="polite" aria-atomic="false"></div>`;
 
@@ -883,6 +1102,148 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    expBtn: $('#btn-exp'), impBtn: $('#btn-imp'), impFile: $('#in-imp-file'),
    testAll: $('#btn-testall'),
    histList: $('#hist-list'), histClear: $('#btn-hist-clear'),
+   platBadges: $('#plat-badges'), pvExpand: $('#pv-expand'), okTip: $('#ok-tip'),
+   secNotion: $('#sec-notion'), secFeishu: $('#sec-feishu'), secObsidian: $('#sec-obsidian'),
+   btnBadge: $('#btn-badge'), theme: $('#in-theme'),
+   setNav: $('#set-nav'), setPanes: $('#set-panes'),
+   ovAsk: $('#ov-ask'), askTitle: $('#ask-title'), askMsg: $('#ask-msg'), askYes: $('#ask-yes'), askNo: $('#ask-no'),
+  };
+
+  // ---------- 发送目标徽章 ----------
+  // 仅做只读呈现 + 跳转到设置，不参与 sendToAll 的平台判定（判定仍以 refreshSettings 后的 S 为准），
+  // 避免两处真相源；关闭设置时重绘即可同步用户在设置里的改动。
+  // 两个正交维度：enabled=开关是否打开，configured=凭据是否齐全；ready=两者皆真。
+  // 三平台口径统一为「能否发送成功」。注意这与 sendToAll 有意不同——后者对 Obsidian 只判开关
+  // （勾了就会尝试发送，缺 Key 则在发送时报连接失败）。指示灯回答的是「能不能发成功」，
+  // 而非「会不会尝试」，否则「勾了但没填 Key」这种最该提醒的场景将永远显示绿灯。
+  const PLAT_BADGES = [
+   { key: 'notion', label: 'Notion',
+    enabled: () => isNotionEnabled(), configured: () => isNotionConfigured(),
+    sec: () => el.secNotion, box: () => el.ckNotion, cfgLive: () => !!(el.tok.value.trim() && el.db.value.trim()) },
+   { key: 'feishu', label: '飞书',
+    enabled: () => isFeishuEnabled(), configured: () => isFeishuConfigured(),
+    sec: () => el.secFeishu, box: () => el.ckFeishu, cfgLive: () => !!(el.fsAppId.value.trim() && el.fsSecret.value.trim()) },
+   { key: 'obsidian', label: 'Obsidian',
+    enabled: () => isObsidianEnabled(), configured: () => isObsidianConfigured(),
+    sec: () => el.secObsidian, box: () => el.ckObsidian, cfgLive: () => !!el.obsApiKey.value.trim() },
+  ];
+  for (const p of PLAT_BADGES) p.ready = () => p.enabled() && p.configured();
+  function renderPlatBadges() {
+   if (!el.platBadges) return;
+   el.platBadges.textContent = '';
+   for (const p of PLAT_BADGES) {
+    const st = platStatus(p);
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'nc-plat ' + st;
+    b.dataset.plat = p.key;
+    b.textContent = (st === 'on' ? '发往 ' : st === 'warn' ? '待补凭据 ' : '未启用 ') + p.label;
+    b.title = st === 'on' ? `${p.label}：已启用且配置完整，点击前往设置调整`
+     : st === 'warn' ? `${p.label}：已启用但凭据不全，发送会失败，点击前往设置补全`
+     : `${p.label}：未启用，点击前往设置开启`;
+    el.platBadges.appendChild(b);
+   }
+  }
+  // 三态指示灯：on=开关已开且凭据齐全；warn=开关已开但凭据不全；off=未启用。
+  // 设置面板打开时读表单实时值（勾掉开关立刻灯灭，清空凭据立刻转 warn，无需先保存），
+  // 关闭后读已落盘的 enabled / configured——两条分支口径一致，不会同一状态两副面孔。
+  const platStatus = (p) => {
+   if (ovVisible(el.ovSet)) {
+    if (!p.box().checked) return 'off';
+    return p.cfgLive() ? 'on' : 'warn';
+   }
+   if (!p.enabled()) return 'off';
+   return p.configured() ? 'on' : 'warn';
+  };
+  function syncSectionState() {
+   for (const p of PLAT_BADGES) {
+    const st = platStatus(p);
+    const sec = p.sec();
+    if (sec) { sec.classList.toggle('on', st === 'on'); sec.classList.toggle('warn', st === 'warn'); }
+    // 标签栏与手风琴标题的状态点共用同一套 on / warn；窄屏收起时靠它们一眼定位到待补配置的平台
+    const navDot = el.setNav.querySelector(`.nc-nav-i[data-tab="${p.key}"] .nc-dot`);
+    const hdDot = el.setPanes.querySelector(`#tab-${p.key} > .nc-pane-hd .nc-dot`);
+    for (const d of [navDot, hdDot]) {
+     if (!d) continue;
+     d.classList.toggle('on', st === 'on'); d.classList.toggle('warn', st === 'warn');
+    }
+   }
+   syncBtnBadge();
+  }
+  // 悬浮球角标：已就绪平台数；0 个时转警示态，点开前就能发现没配好。
+  function syncBtnBadge() {
+   if (!el.btnBadge) return;
+   const n = PLAT_BADGES.filter((p) => p.ready()).length;
+   const warn = n === 0;
+   el.btnBadge.hidden = false;
+   el.btnBadge.textContent = warn ? '!' : String(n);
+   // 有平台已启用但凭据不全时同样转警示色——数字照常显示，但颜色提醒「有平台待补」，
+   // 比一律显示绿灯、等发送失败才发现要诚实。
+   const broken = PLAT_BADGES.filter((p) => !p.ready() && p.enabled()).map((p) => p.label);
+   el.btnBadge.classList.toggle('is-warn', warn || broken.length > 0);
+   const labels = PLAT_BADGES.filter((p) => p.ready()).map((p) => p.label).join('、');
+   el.btnBadge.title = warn
+    ? (broken.length ? `已启用但凭据不全：${broken.join('、')}，右键打开设置` : '未启用任何目标平台，右键打开设置')
+    : `已就绪：${labels}` + (broken.length ? `　·　待补凭据：${broken.join('、')}` : '');
+  }
+  if (el.platBadges) el.platBadges.addEventListener('click', (e) => {
+   if (sending) return;
+   const b = e.target.closest ? e.target.closest('.nc-plat') : null;
+   openSettings(b && b.dataset.plat);
+  }, { signal });
+
+  // ---------- 设置面板分区导航 ----------
+  // 桌面端左侧标签栏 + 右侧内容区；≤600px 由 CSS 降级为手风琴。同一份 DOM，
+  // JS 只维护 active（标签选中）与 open（手风琴展开）两个状态，不感知当前断点。
+  const SET_TABS = ['general', 'notion', 'feishu', 'obsidian', 'tags', 'backup', 'hist', 'keys'];
+  let activeTab = SET_TABS[0];
+  function switchTab(key) {
+   if (!SET_TABS.includes(key)) key = SET_TABS[0];
+   activeTab = key;
+   for (const pane of el.setPanes.querySelectorAll('.nc-pane')) {
+    const on = pane.id === 'tab-' + key;
+    pane.classList.toggle('active', on);
+    pane.classList.toggle('open', on);
+    const hd = pane.querySelector('.nc-pane-hd');
+    if (hd) hd.setAttribute('aria-expanded', on ? 'true' : 'false');
+   }
+   for (const nav of el.setNav.querySelectorAll('.nc-nav-i')) {
+    const on = nav.dataset.tab === key;
+    nav.setAttribute('aria-selected', on ? 'true' : 'false');
+    nav.tabIndex = on ? 0 : -1;
+   }
+   try { GM_setValue(STORAGE.SET_TAB, key); } catch (e) {   }
+  }
+  el.setNav.addEventListener('click', (e) => {
+   const nav = e.target.closest ? e.target.closest('.nc-nav-i') : null;
+   if (nav) switchTab(nav.dataset.tab);
+  }, { signal });
+  // 手风琴：点击已展开的标题收起自身，点击其他标题切到该分区
+  el.setPanes.addEventListener('click', (e) => {
+   const hd = e.target.closest ? e.target.closest('.nc-pane-hd') : null;
+   if (!hd) return;
+   const key = hd.dataset.paneHd;
+   const pane = el.setPanes.querySelector('#tab-' + key);
+   if (key === activeTab && pane && pane.classList.contains('open')) {
+    pane.classList.remove('open'); hd.setAttribute('aria-expanded', 'false'); return;
+   }
+   switchTab(key);
+  }, { signal });
+  el.setNav.addEventListener('keydown', (e) => {
+   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+   e.preventDefault();
+   const i = SET_TABS.indexOf(activeTab), n = SET_TABS.length;
+   const next = SET_TABS[(i + (e.key === 'ArrowDown' ? 1 : n - 1)) % n];
+   switchTab(next);
+   const nav = el.setNav.querySelector(`.nc-nav-i[data-tab="${next}"]`);
+   if (nav) { try { nav.focus(); } catch (err) {   } }
+  }, { signal });
+
+  // ---------- 主题 ----------
+  // 手动指定时给宿主挂 data-theme，CSS 侧据此屏蔽系统深色分支（light）或独立生效（dark）
+  const applyTheme = (v) => {
+   const t = (v === 'light' || v === 'dark') ? v : '';
+   if (t) host.setAttribute('data-theme', t); else host.removeAttribute('data-theme');
   };
 
   // ---------- 运行时状态（按职责分组） ----------
@@ -951,13 +1312,47 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (e.shiftKey) { if (!inside || active === first) { e.preventDefault(); last.focus(); } }
    else if (!inside || active === last) { e.preventDefault(); first.focus(); }
   }
+  // 叠加弹窗按「后开先处理」顺序：ovAsk 可叠在任意面板之上，故排在最前
   function onModalTab(e) {
    if (e.key !== 'Tab') return;
-   for (const ov of [el.ovCfm, el.ovErr, el.ovOk, el.ovSet]) {
+   for (const ov of [el.ovAsk, el.ovSet, el.ovCfm, el.ovErr, el.ovOk]) {
     if (ov.style.display === 'flex') { trapModalTab(e, ov); return; }
    }
   }
   document.addEventListener('keydown', onModalTab, { signal, capture: true });
+
+  // ---------- 自绘确认对话框 ----------
+  // 原生 confirm() 会被部分站点的 CSP / 页面脚本拦截或改写，样式也无法跟随脚本主题，
+  // 统一改为 shadow DOM 内自绘，返回 Promise<boolean>，复用既有焦点记忆与 Tab 循环。
+  let askResolve = null;
+  function askConfirm(opts) {
+   const o = typeof opts === 'string' ? { message: opts } : (opts || {});
+   return new Promise((resolve) => {
+    // 同一时刻只允许一个未决询问；若有旧的先按取消结算，避免其 Promise 永久悬挂
+    if (askResolve) { const prev = askResolve; askResolve = null; prev(false); }
+    el.askTitle.textContent = o.title || '请确认';
+    el.askMsg.textContent = o.message || '';
+    el.askYes.textContent = o.okText || '确定';
+    el.askNo.textContent = o.cancelText || '取消';
+    el.askYes.className = 'nc-b ' + (o.danger ? 'nc-br' : 'nc-b1');
+    askResolve = resolve;
+    rememberFocus();
+    el.ovAsk.style.display = 'flex';
+    try { el.askYes.focus(); } catch (e) {   }
+   });
+  }
+  function closeAsk(v) {
+   if (!askResolve) return;
+   const r = askResolve; askResolve = null;
+   el.ovAsk.style.display = 'none';
+   restoreFocus();
+   r(v);
+  }
+  el.askYes.addEventListener('click', () => closeAsk(true), { signal });
+  el.askNo.addEventListener('click', () => closeAsk(false), { signal });
+  // 仅当点击落在遮罩本身才视为取消，避免面板内点击冒泡误触发
+  el.ovAsk.addEventListener('click', (e) => { if (e.target === el.ovAsk) closeAsk(false); }, { signal });
+  _cleanupFns.push(() => { if (askResolve) { const r = askResolve; askResolve = null; r(false); } });
 
   // ---------- 平台启用/配置判定 ----------
   const isNotionConfigured = () => !!(S.notionToken && S.notionDbId);
@@ -1732,6 +2127,29 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   }, { signal });
   _cleanupFns.push(() => clearTimeout(hoverTimer));
   _cleanupFns.push(() => clearTimeout(okAutoCloseTimer));
+
+  // ---------- 完成面板自动关闭倒计时 ----------
+  // 面板 10s 后自动消失，此前无任何提示，用户常以为内容未保存而重复发送；
+  // 倒计时文案与 okAutoCloseTimer 同源，任一路径关闭都会 stop。
+  const OK_AUTO_CLOSE_MS = 10000;
+  let okCountdownTimer = null;
+  function stopOkCountdown() {
+   if (okCountdownTimer) { clearInterval(okCountdownTimer); okCountdownTimer = null; }
+   if (el.okTip) el.okTip.style.display = 'none';
+  }
+  function startOkCountdown(sec) {
+   stopOkCountdown();
+   if (!el.okTip) return;
+   let left = Math.max(1, sec | 0);
+   el.okTip.style.display = '';
+   el.okTip.textContent = `${left} 秒后自动关闭`;
+   okCountdownTimer = setInterval(() => {
+    left -= 1;
+    if (left <= 0) { stopOkCountdown(); return; }
+    el.okTip.textContent = `${left} 秒后自动关闭`;
+   }, 1000);
+  }
+  _cleanupFns.push(stopOkCountdown);
   el.btn.addEventListener('mousedown', (e) => {
    if (e.button === 2) return;
    e.preventDefault(); e.stopPropagation();
@@ -2064,6 +2482,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const idx = parseInt(item.dataset.index, 10);
    if (!isNaN(idx) && idx >= 0 && idx < blocks.length) { blocks.splice(idx, 1); refreshPreview(); }
   }, { signal });
+  if (el.pvExpand) el.pvExpand.addEventListener('click', (e) => {
+   e.preventDefault();
+   setPvExpanded(!el.pv.classList.contains('expanded'));
+  }, { signal });
   function showConfirm(title) {
    el.title.value = title || pageTitle();
    el.tags.value = matchDomainTags(S.domainTags, location.hostname) || GM_getValue(STORAGE.LAST_TAGS, '');
@@ -2076,6 +2498,15 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    el.modalCfm.classList.remove('minimized');
    el.btnMin.textContent = '🔽';
    el.btnMin.title = '最小化';
+   setPvExpanded(false);
+  }
+  // 预览展开态由面板复位统一收敛——「重选 / 追加 / 重试」等路径都会走 restoreConfirmModal，
+  // 避免上一次展开的大预览残留到下一次剪藏。
+  function setPvExpanded(on) {
+   if (!el.pvExpand) return;
+   el.pv.classList.toggle('expanded', !!on);
+   el.pvExpand.textContent = on ? '收起' : '展开';
+   el.pvExpand.setAttribute('aria-expanded', on ? 'true' : 'false');
   }
   function openConfirm() {
    if (modeAc) { modeAc.abort(); modeAc = null; }
@@ -2084,6 +2515,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    rememberFocus();
    el.ovCfm.style.display = 'flex';
    confirmOpen = true;
+   renderPlatBadges();
    el.title.focus();
   }
   const closeConfirm = () => { if (modeAc) { modeAc.abort(); modeAc = null; } el.ovCfm.style.display = 'none'; confirmOpen = false; restoreFocus(); };
@@ -2104,27 +2536,30 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     }
    }
   }
-  function tryCloseSettings() {
-   if (settingsDirty) {
-    if (!confirm('有未保存的更改，确定关闭？')) return false;
-    settingsDirty = false;
-    if (el.dirtyFlag) el.dirtyFlag.style.display = 'none';
-   }
+  // 返回 Promise<boolean>：调用方一律用 .then(ok => ...)，不可直接取布尔值
+  async function tryCloseSettings() {
+   if (!settingsDirty) return true;
+   const ok = await askConfirm({
+    title: '放弃未保存的更改？',
+    message: '设置面板中有尚未保存的修改，关闭后将丢失。',
+    okText: '放弃并关闭', cancelText: '返回继续编辑', danger: true,
+   });
+   if (!ok) return false;
+   settingsDirty = false;
+   if (el.dirtyFlag) el.dirtyFlag.style.display = 'none';
    return true;
   }
   function onModalEsc(e) {
    if (e.key !== 'Escape') return;
-   for (const ov of [el.ovCfm, el.ovErr, el.ovOk, el.ovSet]) {
-    if (ov.style.display === 'flex') {
-     if (ov === el.ovSet && !tryCloseSettings()) return;
-     e.preventDefault();
-     e.stopImmediatePropagation();
-     if (ov === el.ovCfm) { closeConfirm(); return; }
-     if (ov === el.ovSet) closeSettings();
-     else ov.style.display = 'none';
-     return;
-    }
-   }
+   const ov = [el.ovAsk, el.ovSet, el.ovCfm, el.ovErr, el.ovOk].find((o) => o.style.display === 'flex');
+   if (!ov) return;
+   e.preventDefault();
+   e.stopImmediatePropagation();
+   if (ov === el.ovAsk) { closeAsk(false); return; }
+   // 设置面板有未保存改动时先弹二次确认；用户选择保留则由询问框接管后续 Esc
+   if (ov === el.ovSet) { tryCloseSettings().then((ok) => { if (ok) closeSettings(); }); return; }
+   if (ov === el.ovCfm) { closeConfirm(); return; }
+   ov.style.display = 'none';
   }
   document.addEventListener('keydown', onModalEsc, { signal, capture: true });
   // ===== 发送历史与设置弹窗 =====
@@ -2153,12 +2588,15 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     return `<div class="nc-hist-item"><span class="nc-hist-time">${escHtml(time)}</span><span class="nc-hist-title" title="${escHtml(h.title || '')}">${escHtml(h.title || '(无标题)')}</span><span class="nc-hist-plat">${escHtml(plats)}</span></div>`;
    }).join('') : '<div class="nc-hist-empty">暂无发送记录</div>';
   }
-  function openSettings() {
+  // tab 由调用方指定（如点击平台徽章直达对应分区），缺省沿用上次所在分区
+  function openSettings(tab) {
    refreshSettings();
+   switchTab(tab && SET_TABS.includes(tab) ? tab : (GM_getValue(STORAGE.SET_TAB, SET_TABS[0]) || SET_TABS[0]));
    for (const f of FORM_FIELDS) f.input.value = S[f.snap];
    el.ckNotion.checked = isNotionEnabled();
    el.ckFeishu.checked = isFeishuEnabled();
    el.ckObsidian.checked = isObsidianEnabled();
+   syncSectionState();
    el.sendProfile.value = (S.sendProfile === 'standard') ? 'standard' : 'gentle';
    for (const { input, btn } of [{ input: el.tok, btn: el.tokTglNotion }, { input: el.fsSecret, btn: el.tokTglFeishu }, { input: el.obsApiKey, btn: el.tokTglObsidian }]) {
     input.type = 'password'; btn.textContent = '👁️';
@@ -2173,12 +2611,18 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const inputs = FORM_FIELDS.map(f => f.input).concat([el.ckNotion, el.ckFeishu, el.ckObsidian, el.sendProfile]);
     const onInputChange = () => { settingsDirty = true; if (el.dirtyFlag) el.dirtyFlag.style.display = 'block'; };
     for (const type of ['change', 'input']) inputs.forEach(inp => inp.addEventListener(type, onInputChange, { signal }));
+    for (const ck of [el.ckNotion, el.ckFeishu, el.ckObsidian]) ck.addEventListener('change', syncSectionState, { signal });
+    // 凭据字段边输入边刷新指示灯，让 warn ↔ on 的切换与用户所见同步；
+    // 这几处只在设置面板内触发，不在 60Hz 高频路径上。
+    for (const inp of [el.tok, el.db, el.fsAppId, el.fsSecret, el.obsApiKey]) {
+     inp.addEventListener('input', syncSectionState, { signal });
+    }
     settingsListenersAttached = true;
    }
   }
 
   // ===== 配置导入导出 =====
-  const BACKUP_KEYS = [STORAGE.ENABLE_NOTION, STORAGE.TOKEN, STORAGE.DB_ID, STORAGE.TAGS_PROP, STORAGE.FS_APP_ID, STORAGE.FS_APP_SECRET, STORAGE.FS_FOLDER, STORAGE.ENABLE_OBSIDIAN, STORAGE.OBSIDIAN_API_URL, STORAGE.OBSIDIAN_API_KEY, STORAGE.OBSIDIAN_FOLDER, STORAGE.BLOCKLIST, STORAGE.DOMAIN_TAGS, STORAGE.SEND_PROFILE];
+  const BACKUP_KEYS = [STORAGE.ENABLE_NOTION, STORAGE.TOKEN, STORAGE.DB_ID, STORAGE.TAGS_PROP, STORAGE.FS_APP_ID, STORAGE.FS_APP_SECRET, STORAGE.FS_FOLDER, STORAGE.ENABLE_OBSIDIAN, STORAGE.OBSIDIAN_API_URL, STORAGE.OBSIDIAN_API_KEY, STORAGE.OBSIDIAN_FOLDER, STORAGE.BLOCKLIST, STORAGE.DOMAIN_TAGS, STORAGE.SEND_PROFILE, STORAGE.THEME];
   // 设置表单文本字段清单：「打开回填(snap) / 保存落盘(save 可选转换，默认 trim) / 导入回填(imp 可选转换)」
   const FORM_FIELDS = [
    { key: STORAGE.TOKEN, input: el.tok, snap: 'notionToken' },
@@ -2192,12 +2636,21 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    { key: STORAGE.OBSIDIAN_FOLDER, input: el.obsFolder, snap: 'obsFolder' },
    { key: STORAGE.BLOCKLIST, input: el.blocklist, snap: 'blocklist' },
    { key: STORAGE.DOMAIN_TAGS, input: el.domainTags, snap: 'domainTags' },
+   { key: STORAGE.THEME, input: el.theme, snap: 'theme', imp: (v) => (v === 'light' || v === 'dark') ? v : 'auto' },
   ];
   const toBool = (v) => v === true || v === 'true';
-  el.expBtn.addEventListener('click', () => {
-   if (settingsDirty && !confirm('当前有未保存的表单修改，导出内容不包含这些修改。\n仍要继续导出？')) return;
+  el.expBtn.addEventListener('click', async () => {
+   if (settingsDirty && !(await askConfirm({
+    title: '导出不包含未保存的修改',
+    message: '当前有未保存的表单修改，导出内容不包含这些修改。',
+    okText: '仍要导出', cancelText: '返回',
+   }))) return;
    const hasSecret = !!(GM_getValue(STORAGE.TOKEN, '') || GM_getValue(STORAGE.FS_APP_SECRET, '') || GM_getValue(STORAGE.OBSIDIAN_API_KEY, ''));
-   if (hasSecret && !confirm('导出文件将包含 Token / Secret 明文，请确认保存位置安全。\n继续导出？')) return;
+   if (hasSecret && !(await askConfirm({
+    title: '导出文件包含敏感信息',
+    message: '导出文件将包含 Token / Secret 明文，请确认保存位置安全。',
+    okText: '继续导出', cancelText: '取消', danger: true,
+   }))) return;
    const settings = {};
    for (const k of BACKUP_KEYS) settings[k] = GM_getValue(k, '');
    const payload = { app: 'notion-feishu-obsidian-clipper', version: SCRIPT_VERSION, exportedAt: new Date().toISOString(), settings };
@@ -2224,6 +2677,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     el.ckFeishu.checked = toBool(get(STORAGE.ENABLE_FEISHU));
     el.ckObsidian.checked = toBool(get(STORAGE.ENABLE_OBSIDIAN));
     el.sendProfile.value = get(STORAGE.SEND_PROFILE) === 'standard' ? 'standard' : 'gentle';
+    syncSectionState();
     settingsDirty = true;
     if (el.dirtyFlag) el.dirtyFlag.style.display = 'block';
     toast('✅ 已回填导入配置，请核对后点击「保存设置」生效（Obsidian API 地址：' + el.obsApiUrl.value + '）', 'success');
@@ -2231,8 +2685,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     toast('❌ 导入失败：' + (e?.message === '文件缺少 settings 字段' ? e.message : '文件不是有效的配置 JSON'), 'error');
    }
   }, { signal });
-  el.histClear.addEventListener('click', () => {
-   if (!confirm('确定清空全部发送历史？')) return;
+  el.histClear.addEventListener('click', async () => {
+   if (!(await askConfirm({
+    title: '清空发送历史？',
+    message: '将删除本地保存的全部发送记录，此操作不可撤销。',
+    okText: '清空', cancelText: '取消', danger: true,
+   }))) return;
    GM_setValue(STORAGE.HISTORY, '[]');
    renderSendHistory();
    toast('已清空发送历史', 'success');
@@ -2892,7 +3350,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   // ===== 发送编排 =====
   async function sendToAll(sendBlocks, sendTitle, sendTags, onlyPlatforms, notionResume, feishuResume) {
    refreshSettings();
-   el.send.disabled = true; el.send.textContent = '发送中...'; showProgress();
+   el.send.disabled = true; el.send.textContent = '发送中...'; el.send.classList.add('is-loading'); showProgress();
    const useNotion = isNotionEnabled() && isNotionConfigured();
    const useFeishu = isFeishuEnabled() && isFeishuConfigured();
    const useObsidian = isObsidianEnabled();
@@ -2932,7 +3390,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     promises.push(sleep(delay).then(job.run).then(job.onSuccess).catch(job.onFail));
    }
 
-   if (!promises.length) { el.send.disabled = false; el.send.textContent = '发送'; hideProgress(); toast('没有可发送的平台', 'error'); return; }
+   if (!promises.length) { el.send.disabled = false; el.send.textContent = '发送'; el.send.classList.remove('is-loading'); hideProgress(); toast('没有可发送的平台', 'error'); return; }
    // 复位必须走 finally：此前复位语句在直线路径上，一旦中途抛错就会留下
    // 「sending 恒 true（beforeunload 永久拦截离页）+ 发送按钮恒 disabled」的卡死态。
    try {
@@ -2957,12 +3415,14 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      el.okOpenFeishu.style.display = (feishuOk || allSuccess.some(s => s.startsWith('飞书'))) ? '' : 'none';
      el.okOpenObsidian.style.display = (obsidianOk || allSuccess.includes('Obsidian')) ? '' : 'none';
      el.okMsg.textContent = `已成功保存到 ${allSuccess.join(', ')}`;
-     clearTimeout(okAutoCloseTimer); okAutoCloseTimer = setTimeout(() => { el.ovOk.style.display = 'none'; }, 10000);
+     clearTimeout(okAutoCloseTimer);
+     okAutoCloseTimer = setTimeout(() => { el.ovOk.style.display = 'none'; stopOkCountdown(); }, OK_AUTO_CLOSE_MS);
+     startOkCountdown(OK_AUTO_CLOSE_MS / 1000);
      el.okClose.focus();
     }
    } finally {
     sending = false;
-    el.send.disabled = false; el.send.textContent = '发送'; hideProgress();
+    el.send.disabled = false; el.send.textContent = '发送'; el.send.classList.remove('is-loading'); hideProgress();
    }
   }
   const doSend = () => {
@@ -2978,14 +3438,14 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   function doRetry() {
    if (!cachedSend) { toast('没有可重试的内容', 'error'); return; }
    const retryLabel = el.retry.textContent;
-   el.retry.disabled = true; el.retry.textContent = '发送中...'; el.ovErr.style.display = 'none';
+   el.retry.disabled = true; el.retry.textContent = '发送中...'; el.retry.classList.add('is-loading'); el.ovErr.style.display = 'none';
    el.title.value = cachedSend.title || pageTitle() || 'Untitled'; el.tags.value = cachedSend.tags || '';
    restoreConfirmModal();
    showProgress();
    openConfirm();
    sendToAll(cachedSend.blocks, cachedSend.title, cachedSend.tags, cachedSend.failedPlatforms, cachedSend.notionResume || null, cachedSend.feishuResume || null)
     .catch((err) => { console.error('[NC] 重试流程异常:', err); toast('发送流程异常: ' + (err?.message || '未知'), 'error'); })
-    .finally(() => { el.retry.disabled = false; el.retry.textContent = retryLabel; });
+    .finally(() => { el.retry.disabled = false; el.retry.textContent = retryLabel; el.retry.classList.remove('is-loading'); });
   }
 
   // ===== 密码可见性切换 =====
@@ -3086,20 +3546,32 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   }, { signal });
 
   // ===== 事件绑定 =====
-  const closeSettings = () => { el.ovSet.style.display = 'none'; restoreFocus(); };
-  $('#btn-sc').addEventListener('click', () => { if (!tryCloseSettings()) return; closeSettings(); }, { signal });
-  $('#btn-ss').addEventListener('click', () => {
+  const closeSettings = () => {
+   el.ovSet.style.display = 'none'; restoreFocus();
+   // 关闭后指示灯/角标回落为已落盘状态（放弃的修改不应继续显示为生效）
+   syncSectionState();
+   // 设置里改过平台开关后回到仍打开的确认面板，徽章需按新配置重绘
+   if (el.ovCfm && el.ovCfm.style.display === 'flex') renderPlatBadges();
+  };
+  $('#btn-sc').addEventListener('click', () => { tryCloseSettings().then((ok) => { if (ok) closeSettings(); }); }, { signal });
+  $('#btn-ss').addEventListener('click', async () => {
    const notionToken = el.tok.value.trim(); const dbRaw = el.db.value.trim(); const notionDbId = parseDbId(dbRaw);
    if (notionToken && dbRaw && !notionDbId) { toast('Notion Database ID / 链接格式不正确（应包含 32 位字符）', 'error'); return; }
    const obsUrlToSave = el.obsApiUrl.value.trim();
    if (obsUrlToSave && !isLocalishTarget(obsUrlToSave)) {
-    if (!confirm('⚠️ Obsidian API 地址指向外部主机，启用后每次剪藏都会把页面全文发送到该地址。确定保存？')) return;
+    if (!(await askConfirm({
+     title: '保存外部 API 地址？',
+     message: 'Obsidian API 地址指向外部主机，启用后每次剪藏都会把页面全文发送到该地址。',
+     okText: '确定保存', cancelText: '取消', danger: true,
+    }))) return;
    }
    GM_setValue(STORAGE.ENABLE_NOTION, el.ckNotion.checked); GM_setValue(STORAGE.ENABLE_FEISHU, el.ckFeishu.checked);
    GM_setValue(STORAGE.ENABLE_OBSIDIAN, el.ckObsidian.checked);
    for (const f of FORM_FIELDS) GM_setValue(f.key, f.save ? f.save(f.input.value) : f.input.value.trim());
    GM_setValue(STORAGE.SEND_PROFILE, el.sendProfile.value === 'standard' ? 'standard' : 'gentle');
    refreshSettings();
+   applyTheme(el.theme.value);
+   syncSectionState();
    notionDbCache = { dbId: '', props: null };
    settingsDirty = false; if (el.dirtyFlag) el.dirtyFlag.style.display = 'none'; closeSettings(); toast('✅ 保存成功！');
   }, { signal });
@@ -3121,7 +3593,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   el.okOpenNotion.addEventListener('click', () => { if (!lastNotionPageId) return; openTab(`https://www.notion.so/${lastNotionPageId.replace(/-/g, '')}`); }, { signal });
   el.okOpenFeishu.addEventListener('click', () => { if (!lastFeishuDocId) { openTab('https://www.feishu.cn/'); return; } openTab(`https://www.feishu.cn/docx/${lastFeishuDocId}`); }, { signal });
   el.okOpenObsidian.addEventListener('click', () => { const a = document.createElement('a'); a.href = 'obsidian://'; a.style.display = 'none'; document.body.appendChild(a); a.click(); a.remove(); }, { signal });
-  el.okClose.addEventListener('click', () => { clearTimeout(okAutoCloseTimer); el.ovOk.style.display = 'none'; cachedSend = null; }, { signal });
+  el.okClose.addEventListener('click', () => { clearTimeout(okAutoCloseTimer); stopOkCountdown(); el.ovOk.style.display = 'none'; cachedSend = null; }, { signal });
   el.retry.addEventListener('click', doRetry, { signal });
   el.errCopy.addEventListener('click', () => { copyText(el.errDetail.textContent || '', '已复制错误详情'); }, { signal });
   el.errMd.addEventListener('click', () => {
@@ -3144,6 +3616,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   window.addEventListener('beforeunload', (e) => { if (sending || (blocks.length && el.ovCfm.style.display === 'flex')) { e.preventDefault(); e.returnValue = ''; } }, { signal });
   window.addEventListener('pagehide', (e) => { if (e.persisted) return; if (window.__ncCleanup) window.__ncCleanup(); }, { signal });
   document.addEventListener('keydown', onGlobalKey, { signal, capture: true });
+  // ===== 初始化收尾 =====
+  applyTheme(S.theme);                 // 主题：auto 时不挂属性，交由 CSS 媒体查询跟随系统
+  switchTab(GM_getValue(STORAGE.SET_TAB, SET_TABS[0]) || SET_TABS[0]);
+  syncSectionState();                  // 顺带初始化悬浮球角标
   loadPos();
  }
 
