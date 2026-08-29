@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name Notion & Feishu & Obsidian Web Clipper
 // @namespace https://github.com/yuhaung/notion-web-clipper
-// @version      5.7.1
-// @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。v5.7.1：修复 Ctrl+Enter 连按重入导致整份内容向各平台双发（键盘路径此前无任何状态守卫）；修复 IPv6 内网地址（如 [::1]）绕过 SSRF 防护——WHATWG URL 的 hostname 含方括号，原 IPv6 正则全部漏配；Twitter 会话提取增规模护栏（60 条上限 + 单推节点上限），新增 Alt+单击仅剪藏当前推文；平台未配置时不再残留选取模式；失败弹窗「复制 Markdown」扩展至任意平台失败场景；坏图增 30 秒负缓存；Obsidian 写入重试幂等化（防超时歧义下换名双写）；@connect 补充 csdnimg/juejin/sspai/126.net 图床；防御性加固（win.opener 包裹 try、预览递归补传深度、Notion 页面图标跳过 SVG、响应头正则缓存）。v5.7.0：新增「发送节奏」档位（默认温和：三平台错峰启动 700ms、图片下载并发降为 2、API 写入间隔放宽至 550ms，显著降低瞬时并发以规避平台接口限流）；修复 window.open 带 noopener 恒返回 null 导致「弹窗被阻止」误报；Obsidian 未配置 API Key 时不再默认尝试发送（此前每次剪藏必附带一次注定失败的上传）；深层嵌套 DETAILS/列表递归增加深度护栏防栈溢出；Markdown front matter 补反斜杠与换行转义。v5.6.0：选取模式新增 ↑/↓ 调整选取范围（父子元素间切换，对齐官方 Clipper 体验）；设置面板新增「禁用站点」黑名单（命中则本脚本不启用）与「域名默认标签」（按站点自动预填标签，含子域匹配）。v5.5.0：修复确认弹窗 keydown 监听随剪藏次数累积泄漏、重试后快捷键失效、PRE/TABLE 悬停被外层容器抢占选取；复制/Markdown 补齐表格与折叠块内容并转义 URL 空格括号；推文正文剔除操作栏计数；图片缓存增总字节上限、去除上传双层重试叠加。新增「➕ 追加」多次选取合并、发送中防误关页面、进度条单调推进、重试保留已成功平台入口。
+// @version      5.16.2
+// @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。变更日志见脚本头部 v5.16.x 注释与 CHANGELOG.md。
 // @author yuhauang
 // @match *://*/*
 // @noframes
@@ -48,6 +48,9 @@
 // @connect *.juejin.cn
 // @connect *.sspai.com
 // @connect *.126.net
+// @connect *.notion-static.com
+// @connect *.notion.site
+// @connect *.larksuite.com
 // @license MIT
 // ==/UserScript==
 
@@ -56,35 +59,34 @@
  if (window.self !== window.top) return;
 
  // ---- 单实例清理：重复注入时先卸载旧实例 ----
- if (typeof window.__ncCleanup === 'function') { try { window.__ncCleanup(); } catch { /* 旧实例已失效 */ } }
+ if (typeof window.__ncCleanup === 'function') { try { window.__ncCleanup(); } catch {   } }
  const _cleanupFns = [];
- window.__ncCleanup = () => { for (const fn of _cleanupFns) { try { fn(); } catch { /* 清理失败不致命 */ } } _cleanupFns.length = 0; };
+ window.__ncCleanup = () => { for (const fn of _cleanupFns) { try { fn(); } catch {   } } _cleanupFns.length = 0; };
 
- // ============================================================
- // 常量
- // ============================================================
+ // ===== 常量与配置 =====
+ // v5.16.1 修复：断点续传网络丢响应重复写入（Notion/飞书重试前对账已写入边界）、Obsidian 保存路径穿越、发送态异常按钮与进度条卡死、拖拽窗口外松手持续跟随、closed Shadow DOM Ctrl+A 选中预览、Notion 标签属性类型不兼容静默丢弃、提取异常停留选取模式、连接测试汇总显示失败原因；清理重复代码、统一命名注释；UI：设计令牌体系、WCAG AA 对比度、label/role/aria、窄屏断点、触摸目标、reduced-motion。
+// v5.16.2 修复：飞书断点续传边界被嵌套降级块污染（重试丢块）、拖拽复位定时器竞态、选取 rAF 清理遗漏、预览链接协议复验；统一 zh* 命名与分节注释；UI：模态焦点管理与 Tab 循环、进度条 aria 语义、占位符对比度、预览图片失败占位。
+const SCRIPT_VERSION = '5.16.2';
  const C = Object.freeze({
   TEXT_SAFE: 1990, RT_ITEMS_MAX: 100, BATCH_SIZE: 100,
   TABLE_MAX_COLS: 5, TABLE_MAX_ROWS: 100, TAG_NAME_MAX: 100, URL_MAX: 2000,
   API_RETRY: 3, API_TIMEOUT: 30000, TITLE_MAX: 200, BTN_SIZE: 50,
   VISIBLE_PART: 25, SNAP_THRESHOLD: 30, LARGE_IMG_RATIO: 0.8, DRAG_CLICK_PX: 4,
-  IMG_CHECK_MS: 250, TOAST_MS: 3000, TOAST_MAX: 3, WALK_DEPTH_MAX: 60,
+  IMG_CHECK_MS: 250, TOAST_MS: 3000, TOAST_MAX: 3, HISTORY_MAX: 20, WALK_DEPTH_MAX: 60,
   BLOCKS_WARN: 500, FS_BATCH: 50, FS_IMG_PER_REQ: 20,
-  FS_UPLOAD_TIMEOUT: 60000, FS_INIT_WAIT: 500, FS_INIT_RETRY: 2,
+  FS_UPLOAD_TIMEOUT: 60000, FS_INIT_WAIT: 500, FS_INIT_RETRY: 2, FS_IMG_WARN: 30,
+  FS_REL_RETRY: 2, FS_REL_RETRY_WAIT: 800,
   IMG_DL_TIMEOUT: 20000, IMG_DL_RETRY: 2,
   IMG_UP_MAX: 15 * 1024 * 1024, IMG_DL_CACHE_MAX: 50, IMG_DL_CACHE_BYTES: 50 * 1024 * 1024, FS_BLOCK_DEPTH_MAX: 40,
   CLONE_NODE_MAX: 5000, PREVIEW_DEPTH_MAX: 30, OBS_WRITE_GAP: 300, OBS_RETRY: 3,
-  TW_CONV_MAX: 60, IMG_FAIL_TTL: 30000, // v5.7.1：Twitter 会话护栏 / 坏图负缓存 TTL
+  TW_CONV_MAX: 60, IMG_FAIL_TTL: 30000, IMG_FAIL_MAX: 256,
+  NOTION_REQ_BLOCKS_MAX: 950, NOTION_REQ_BYTES_MAX: 450 * 1024,
  });
 
- // v5.7.0：发送节奏档位——gentle（默认）降低瞬时并发与请求频率，规避平台接口限流；
- // standard 为较快节奏（错峰 300ms · 下载并发 3 · 写入间隔 350ms）。staggerMs=平台错峰启动间隔；imgConc=图片下载并发；apiGapMs=Notion/飞书写入最小间隔
  const SEND_PROFILES = Object.freeze({
   gentle: Object.freeze({ staggerMs: 700, imgConc: 2, apiGapMs: 550 }),
   standard: Object.freeze({ staggerMs: 300, imgConc: 3, apiGapMs: 350 }),
  });
- const getProfile = () => SEND_PROFILES[S.sendProfile] || SEND_PROFILES.gentle;
-
  const STORAGE = Object.freeze({
   ENABLE_NOTION: 'enable_notion', ENABLE_FEISHU: 'enable_feishu', TOKEN: 'notion_token',
   DB_ID: 'notion_db_id', TAGS_PROP: 'notion_tags_prop', FS_APP_ID: 'feishu_app_id',
@@ -94,13 +96,13 @@
   OBSIDIAN_API_URL: 'obsidian_api_url', OBSIDIAN_API_KEY: 'obsidian_api_key',
   OBSIDIAN_FOLDER: 'obsidian_folder',
   LAST_TAGS: 'nc_last_tags',
-  BLOCKLIST: 'nc_blocklist', // v5.6.0：用户自定义禁用站点（逗号/换行分隔）
-  DOMAIN_TAGS: 'nc_domain_tags', // v5.6.0：域名默认标签（每行一条 域名=标签1,标签2）
-  SEND_PROFILE: 'nc_send_profile', // v5.7.0：发送节奏档位 gentle|standard
+  BLOCKLIST: 'nc_blocklist',
+  DOMAIN_TAGS: 'nc_domain_tags',
+  SEND_PROFILE: 'nc_send_profile',
+  HISTORY: 'nc_send_history',
 });
 
  const FS_BLK = Object.freeze({ TEXT: 2, H1: 3, H2: 4, H3: 5, H4: 6, H5: 7, H6: 8, H7: 9, H8: 10, H9: 11, BULLET: 12, ORDERED: 13, CODE: 14, QUOTE: 15, DIVIDER: 22, IMAGE: 27 });
- // 可挂到父块下构成嵌套的飞书块类型（标题在部分 API 场景不可缩进，保守拍平）
  const FS_NESTABLE = new Set([FS_BLK.TEXT, FS_BLK.BULLET, FS_BLK.ORDERED, FS_BLK.QUOTE, FS_BLK.CODE, FS_BLK.DIVIDER, FS_BLK.IMAGE]);
  const BLOCK_TAGS = new Set(['P','DIV','SECTION','ARTICLE','LI','BLOCKQUOTE','H1','H2','H3','H4','H5','H6','PRE','TABLE','ASIDE','MAIN','HEADER','FOOTER']);
  const INLINE_TAGS = new Set(['SPAN','A','EM','STRONG','B','I','U','INS','CODE','MARK','SMALL','SUB','SUP','S','DEL','STRIKE']);
@@ -111,30 +113,29 @@
  const NOTION_LANGS = new Set(['abap','agda','arduino','ascii art','assembly','bash','basic','bnf','c','c#','c++','clojure','coffeescript','coq','css','dart','dhall','diff','docker','ebnf','elixir','elm','erlang','f#','flow','fortran','gherkin','glsl','go','graphql','groovy','haskell','hcl','html','idris','java','javascript','json','julia','kotlin','latex','less','lisp','livescript','llvm ir','lua','makefile','markdown','markup','matlab','mathematica','mermaid','nix','objective-c','ocaml','pascal','perl','php','plain text','powershell','prolog','protobuf','purescript','python','r','racket','reason','ruby','rust','sass','scala','scheme','scss','shell','smalltalk','solidity','sql','swift','toml','typescript','vb.net','verilog','vhdl','visual basic','webassembly','xml','yaml']);
  const LANG_ALIAS = Object.freeze({ js:'javascript',ts:'typescript',py:'python',sh:'shell',zsh:'bash',fish:'shell',cpp:'c++',cxx:'c++',csharp:'c#',golang:'go',rs:'rust',rb:'ruby',kt:'kotlin',objc:'objective-c',md:'markdown',yml:'yaml',plaintext:'plain text',txt:'plain text',text:'plain text',html5:'html',vue:'html',jsx:'javascript',tsx:'typescript','c++20':'c++',shellsession:'shell',console:'shell',ini:'plain text',conf:'plain text' });
  const FEISHU_LANG_MAP = { 'plain text':1,'abap':2,'ada':3,'apache':4,'apex':5,'assembly':6,'bash':7,'c#':8,'c++':9,'c':10,'cobol':11,'css':12,'coffeescript':13,'d':14,'dart':15,'delphi':16,'django':17,'docker':18,'erlang':19,'fortran':20,'foxpro':21,'go':22,'groovy':23,'html':24,'htmlbars':25,'http':26,'haskell':27,'json':28,'java':29,'javascript':30,'julia':31,'kotlin':32,'latex':33,'lisp':34,'logo':35,'lua':36,'matlab':37,'makefile':38,'markdown':39,'nginx':40,'objective-c':41,'openedgeabl':42,'php':43,'perl':44,'postscript':45,'powershell':46,'prolog':47,'protobuf':48,'python':49,'r':50,'rpg':51,'ruby':52,'rust':53,'sas':54,'scss':55,'sql':56,'scala':57,'scheme':58,'scratch':59,'shell':60,'swift':61,'thrift':62,'typescript':63,'vbscript':64,'visual basic':65,'xml':66,'yaml':67,'cmake':68,'diff':69,'gherkin':70,'graphql':71,'glsl':72,'properties':73,'solidity':74,'toml':75 };
- const IMG_EXT = Object.freeze({ 'image/jpeg':'jpg','image/jpg':'jpg','image/png':'png','image/gif':'gif','image/webp':'webp','image/bmp':'bmp','image/tiff':'tif','image/svg+xml':'svg','image/x-icon':'ico','image/vnd.microsoft.icon':'ico','image/heic':'heic','image/heif':'heif' });
- const SENSITIVE_DOMAINS = [/bank\./i,/-bank\./i,/\.bank\./i,/mail\./i,/outlook\./i,/gmail\./i,/\.mail\./i,/^pay\./i,/alipay\./i,/tenpay\./i,/paypal\./i,/^passport\./i,/^account\./i,/^auth\./i,/^login\./i,/^admin\./i,/^console\./i,/^manage\./i,/^dashboard\./i,/^localhost$/i,/^127\./,/^10\./,/^192\.168\./,/^172\.(1[6-9]|2\d|3[01])\./,/^169\.254\./,/^::1$/,/^fe80:/i,/^fc00:/i,/^fd00:/i];
+ const IMG_EXT = Object.freeze({ 'image/jpeg':'jpg','image/jpg':'jpg','image/png':'png','image/gif':'gif','image/webp':'webp','image/bmp':'bmp','image/tiff':'tif','image/svg+xml':'svg','image/x-icon':'ico','image/vnd.microsoft.icon':'ico','image/heic':'heic','image/heif':'heif','image/avif':'avif' });
+ // localhost 与私网 IP 字面量判定统一在 isSensitiveHost 内完成（含 *.localhost 子域），与 isPrivateURL 口径一致
+ const SENSITIVE_DOMAINS = [/bank\./i,/mail\./i,/outlook\./i,/^pay\./i,/alipay\./i,/tenpay\./i,/paypal\./i,/^passport\./i,/^account\./i,/^auth\./i,/^login\./i,/^admin\./i,/^console\./i,/^manage\./i,/^dashboard\./i];
 
- // ============================================================
- // 共享工具函数（模块级，无 DOM 依赖）
- // ============================================================
+ const PLATFORM_LABELS = Object.freeze({ notion: 'Notion', feishu: '飞书', obsidian: 'Obsidian' });
+
+ // ===== 通用工具与重试 =====
  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+ const pad2 = (n) => String(n).padStart(2, '0');
 
- /** 安全解析 JSON：解析失败返回 null（供多处响应解析复用，消除重复 try/catch） */
  function tryParseJSON(text) {
   try { return JSON.parse(text); } catch { return null; }
  }
 
- /** 从 GM_xmlhttpRequest 的 responseHeaders 字符串中提取指定响应头的值（不区分大小写） */
- const _hdrReCache = new Map(); // v5.7.1：按 header 名缓存编译结果，避免每次响应重复编译正则
- function parseResponseHeader(res, name) {
-  const headers = String(res?.responseHeaders || '');
-  let re = _hdrReCache.get(name);
-  if (!re) { re = new RegExp(`${name}\\s*:\\s*([^\\r\\n;]+)`, 'i'); _hdrReCache.set(name, re); }
-  const m = headers.match(re);
-  return m ? m[1].trim() : '';
- }
+const _hdrReCache = new Map();
+function parseResponseHeader(res, name) {
+ const headers = String(res?.responseHeaders || '');
+ let re = _hdrReCache.get(name);
+ if (!re) { re = new RegExp(`${String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:\\s*([^\\r\\n;]+)`, 'i'); _hdrReCache.set(name, re); }
+ const m = headers.match(re);
+ return m ? m[1].trim() : '';
+}
 
- /** 通用可重试错误判定：网络错误 / 429 限流 / 5xx 服务端错误（各处重试逻辑的统一子集） */
  function isRetryableError(err) {
   return !!err && (!!err.network || err.status === 429 || (err.status >= 500 && err.status < 600));
  }
@@ -146,7 +147,7 @@
   */
  async function withRetry(fn, opts) {
   const { retries = C.API_RETRY, baseDelay = 1000, retryOn } = opts || {};
-  const total = Math.max(1, retries); // 防御 retries<=0 时循环体不执行却 throw lastErr(null)
+  const total = Math.max(1, retries);
   let lastErr = null;
   for (let attempt = 0; attempt < total; attempt++) {
    try { return await fn(attempt, lastErr); }
@@ -154,10 +155,11 @@
     lastErr = err;
     const retryable = retryOn ? retryOn(err, attempt) : isRetryableError(err);
     if (attempt < total - 1 && retryable) {
-     const retryAfter = (err?.retryAfter || 0) * 1000;
-     const backoff = baseDelay * (1 << attempt); // 2^attempt 指数退避
-     const jitter = 0.75 + Math.random() * 0.5; // 抖动 0.75~1.25，避免多平台重试同步“惊群”
-     await sleep(Math.max(retryAfter, backoff) * jitter);
+     const retryAfterSec = (err?.retryAfter || 0);
+     if (retryAfterSec > 0) { await sleep(Math.min(retryAfterSec * 1000 + 250, 60000)); continue; }
+     const backoff = baseDelay * (1 << attempt);
+     const jitter = 0.75 + Math.random() * 0.5;
+     await sleep(backoff * jitter);
      continue;
     }
     throw err;
@@ -166,9 +168,14 @@
   throw lastErr;
  }
 
- function isSensitiveHost(hostname) { const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, ''); for (const re of SENSITIVE_DOMAINS) if (re.test(h)) return true; return false; } // v5.7.1：剥 IPv6 方括号（WHATWG URL 的 hostname 形如 [::1]，原 ^::1$ 等正则全部漏配）
+ function isSensitiveHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (isPrivateIPLiteral(h)) return true;
+  for (const re of SENSITIVE_DOMAINS) if (re.test(h)) return true;
+  return false;
+ }
 
- // v5.6.0：用户自定义禁用站点匹配——条目支持 example.com（含任意子域）与 *.example.com（仅子域）
  function isUserBlocked(hostname, raw) {
   const h = String(hostname || '').toLowerCase();
   if (!h) return false;
@@ -181,7 +188,6 @@
   return false;
  }
 
- // v5.6.0：域名默认标签匹配——每行「域名=标签1,标签2」，当前站点命中（含子域）即返回其标签串
  function matchDomainTags(raw, hostname) {
   const h = String(hostname || '').toLowerCase();
   if (!h) return '';
@@ -196,20 +202,60 @@
   return '';
  }
 
- // 合并后的内网/元数据 IP 判定（IPv4 + IPv6 + 云元数据端点）
  const PRIVATE_IPV4_RE = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|198\.1[89]\.)/;
  const PRIVATE_IPV6_RE = /^(::1$|fe80:|fc00:|fd00:)/i;
+ // === '[::ffff:7f00:1]' —— WHATWG URL 将 IPv6 序列化为十六进制组而非点分十进制；
+ function ipv4FromMappedHost(host) {
+  const m = /^::ffff:(.+)$/i.exec(String(host || ''));
+  if (!m) return null;
+  const tail = m[1];
+  if (tail.indexOf('.') >= 0) {
+   if (!/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(tail)) return null;
+   const p = tail.split('.').map(Number);
+   if (p.some(v => !(v >= 0 && v <= 255))) return null;
+   return p;
+  }
+  const hm = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(tail);
+  if (!hm) return null;
+  const hi = parseInt(hm[1], 16), lo = parseInt(hm[2], 16);
+  if (!(hi >= 0 && hi <= 0xffff) || !(lo >= 0 && lo <= 0xffff)) return null;
+  return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff];
+ }
+ // 私有网段/IP 字面量判定单一来源——isSensitiveHost 与 isPrivateURL 共用同一口径。
+ function isPrivateIPLiteral(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  let ipClassified = false;
+  const mappedV4 = ipv4FromMappedHost(h);
+  if (mappedV4) {
+   ipClassified = true;
+   const dottedMapped = mappedV4.join('.');
+   if (PRIVATE_IPV4_RE.test(dottedMapped) || mappedV4[0] === 255) return true;
+  }
+  if (PRIVATE_IPV4_RE.test(h)) {
+   if (/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.test(h)) { const p = h.split('.').map(Number); if (p[0] === 255) return true; }
+   return true;
+  }
+  if (PRIVATE_IPV6_RE.test(h)) return true;
+  // IP 字面量 fail-closed——形似 IP 却无法解析归类的按私有处理：① 含 ':' 的其余 IPv6 变体；
+  const isStdQuad = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(h);
+  if (!ipClassified && !isStdQuad && (h.includes(':') || /^[\d.]+$/.test(h) || /^0x[0-9a-f]+$/i.test(h))) return true;
+  return false;
+ }
  function isPrivateURL(urlStr) {
   try {
-   const u = new URL(urlStr); const h = u.hostname.replace(/^\[|\]$/g, '').toLowerCase(); // v5.7.1：剥 IPv6 方括号，否则 PRIVATE_IPV6_RE 全部漏配（SSRF 防护失效）
+   const u = new URL(urlStr); const h = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
    if (h === 'localhost' || h.endsWith('.localhost')) return true;
-   if (PRIVATE_IPV4_RE.test(h)) {
-    if (/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.test(h)) { const p = h.split('.').map(Number); if (p[0] === 255) return true; }
-    return true;
-   }
-   if (PRIVATE_IPV6_RE.test(h)) return true;
+   if (isPrivateIPLiteral(h)) return true;
    if (h === '169.254.169.254' || h === 'metadata.google.internal') return true;
    return false;
+  } catch { return false; }
+ }
+
+ function isLocalishTarget(urlStr) {
+  try {
+   const u = new URL(String(urlStr || '').trim());
+   if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+   return isPrivateURL('https://' + u.hostname);
   } catch { return false; }
  }
 
@@ -234,8 +280,10 @@
   if (!raw || typeof raw !== 'string') return null;
   const s = raw.trim();
   if (DATA_IMG_RE.test(s)) return s;
-  return normURL(s) || safeURL(s);
+  return normOrSafe(s);
  }
+ // 协议相对 / 根相对补全优先，其次走 new URL 校验；两阶段解析在多处复用，收敛为具名函数
+ const normOrSafe = (raw) => normURL(raw) || safeURL(raw);
  function parseDbId(raw) {
   const s = String(raw || '').trim();
   if (!s) return '';
@@ -243,9 +291,31 @@
   return m ? m[0] : '';
  }
 
- // ============================================================
- // 图片类型嗅探：表驱动签名匹配（替代长串 if-else）
- // ============================================================
+ // 合并 INLINE_TAGS 与 A 两个冗余分支（原两分支仅差末尾换行，且两类标签集无交集，
+ // 合并后行为等价）；firstChild/nextSibling 直连遍历 + 字符串累加替代 parts 数组，
+ // 消除每次调用的临时数组与 join 开销——表格逐格、标题提取等高频路径收益明显。
+ function innerText(node) {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+  const tag = node.tagName;
+  if (tag === 'IMG' || tag === 'VIDEO' || tag === 'IFRAME') return '';
+  if (tag === 'BR') return '\n';
+  let s = '';
+  for (let c = node.firstChild; c; c = c.nextSibling) s += innerText(c);
+  if (BLOCK_TAGS.has(tag) && tag !== 'TABLE') s += '\n';
+  return s;
+ }
+ function mergeAnnot(tag, parent) {
+  const a = parent ? { ...parent } : {};
+  if (tag === 'B' || tag === 'STRONG') a.bold = true;
+  if (tag === 'I' || tag === 'EM') a.italic = true;
+  if (tag === 'U' || tag === 'INS') a.underline = true;
+  if (tag === 'S' || tag === 'DEL' || tag === 'STRIKE') a.strikethrough = true;
+  if (tag === 'CODE') a.code = true;
+  return Object.keys(a).length ? a : null;
+ }
+
+ // ===== 图片类型嗅探与 data: 解码 =====
  const IMG_SIGNATURES = [
   { sig: [0x89,0x50,0x4E,0x47], ct: 'image/png' },
   { sig: [0xFF,0xD8,0xFF], ct: 'image/jpeg' },
@@ -265,22 +335,20 @@
     return ct;
    }
   }
-  // SVG / XML 文本头
   if (b.length >= 5) {
-   const head = String.fromCharCode(...Array.from(b.slice(0, 5))).toLowerCase();
-   if (head.startsWith('<svg ') || head.startsWith('<?xml') || head.startsWith('<svg>')) return 'image/svg+xml';
+   const head = String.fromCharCode(b[0], b[1], b[2], b[3], b[4]).toLowerCase();
+   if (head.startsWith('<?xml') || head.startsWith('<svg')) return 'image/svg+xml';
   }
-  // HEIC / HEIF ftyp box
   if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
    const brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
    if (brand === 'heic' || brand === 'heix' || brand === 'hevc' || brand === 'heim') return 'image/heic';
    if (brand === 'heif' || brand === 'mif1' || brand === 'msf1') return 'image/heif';
+   if (brand === 'avif' || brand === 'avis') return 'image/avif';
   }
   return null;
  }
 
  function decodeDataURL(url) {
-  // v5.2.0 修复：此前误引用 m[2]（正则仅一个捕获组），导致 b64 恒为 undefined 抛 TypeError
   const m = /^data:image\/[a-z0-9.+-]+;base64,(.+)$/is.exec(url);
   if (!m) return null;
   const b64 = m[1];
@@ -296,10 +364,270 @@
   } catch { return null; }
  }
 
- // ============================================================
- // 设置快照：发送流程中一次性读取所有 GM_getValue，避免反复存储访问
- // v5.2.0：升级为模块级快照 S + refreshSettings()，所有热路径共享同一份
- // ============================================================
+ // ===== Notion 块构建 =====
+ function toRich(text) {
+  const s = String(text ?? '');
+  if (!s) return [];
+  const items = [];
+  for (let i = 0; i < s.length && items.length < C.RT_ITEMS_MAX; i += C.TEXT_SAFE)
+   items.push({ type: 'text', text: { content: s.slice(i, i + C.TEXT_SAFE) } });
+  if (items.length === C.RT_ITEMS_MAX && s.length > C.RT_ITEMS_MAX * C.TEXT_SAFE) {
+   const last = items[items.length - 1].text.content;
+   items[items.length - 1].text.content = last.slice(0, -3) + '...';
+  }
+  return items;
+ }
+ function capRT(rt) {
+  const out = [];
+  for (const item of rt || []) {
+   if (out.length >= C.RT_ITEMS_MAX) break;
+   const content = String(item.text?.content ?? '');
+   if (!content) continue;
+   const link = item.text?.link?.url ? safeURL(item.text.link.url) : null;
+   const annots = item.annotations || null;
+   if (content.length <= C.TEXT_SAFE) {
+    const node = { type: 'text', text: { content } };
+    if (link) node.text.link = { url: link };
+    if (annots) node.annotations = annots;
+    out.push(node);
+    continue;
+   }
+   const first = { type: 'text', text: { content: content.slice(0, C.TEXT_SAFE) } };
+   if (link) first.text.link = { url: link };
+   if (annots) first.annotations = annots;
+   out.push(first);
+   for (let i = C.TEXT_SAFE; i < content.length && out.length < C.RT_ITEMS_MAX; i += C.TEXT_SAFE)
+    out.push({ type: 'text', text: { content: content.slice(i, i + C.TEXT_SAFE) } });
+  }
+  return out;
+ }
+ const mkBlockRT = (type, rt, extra) => ({ object: 'block', type, [type]: { rich_text: (rt && rt.length) ? rt : [{ type: 'text', text: { content: '' } }], ...(extra || {}) } });
+ const mkBlock = (type, text, extra) => mkBlockRT(type, toRich(text), extra);
+ const mkPara = (t) => mkBlock('paragraph', t);
+ const mkH = (lv, t) => mkBlock(`heading_${Math.min(Math.max(lv | 0, 1), 3)}`, t);
+ const mkQuote = (t) => mkBlock('quote', t);
+ const mkDivider = () => ({ object: 'block', type: 'divider', divider: {} });
+ const mkCode = (text, lang) => {
+  const l = lang ? String(lang).toLowerCase().trim() : '';
+  return mkBlock('code', text, { language: NOTION_LANGS.has(l) ? l : (LANG_ALIAS[l] || 'plain text') });
+ };
+ const mkRichPara = (richArr) => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: capRT(richArr) } });
+ function mkMedia(type, rawUrl) {
+  const raw = String(rawUrl || '');
+  if (type === 'image' && DATA_IMG_RE.test(raw)) return { object: 'block', type: 'image', image: { type: 'external', external: { url: raw } } };
+  const url = safeURL(raw);
+  if (!url) return null;
+  if (type === 'image') return { object: 'block', type: 'image', image: { type: 'external', external: { url } } };
+  if (type === 'video') return { object: 'block', type: 'video', video: { type: 'external', external: { url } } };
+  return { object: 'block', type: 'embed', embed: { url } };
+ }
+ // mkMedia 返回块或 null；调用方多需要「0 或 1 个块」的数组，收敛为具名函数
+ const mediaBlocks = (type, url) => { const b = mkMedia(type, url); return b ? [b] : []; };
+ function mkTable(rows, hasHeader) {
+  const valid = rows.filter(r => Array.isArray(r) && r.length > 0);
+  if (!valid.length) return [];
+  let w = 1;
+  for (const r of valid) w = Math.max(w, r.length);
+  w = Math.min(w, C.TABLE_MAX_COLS);
+  const norm = valid.map(row => {
+   const cells = [];
+   for (let i = 0; i < w; i++) {
+    let t = String(row[i] ?? '');
+    if (i === w - 1 && row.length > C.TABLE_MAX_COLS) {
+     const overflow = row.slice(C.TABLE_MAX_COLS).map(c => String(c ?? '').trim()).filter(Boolean);
+     if (overflow.length) t = [t.trim(), ...overflow].filter(Boolean).join(' / ');
+    }
+    cells.push(t ? toRich(t) : []);
+   }
+   return { type: 'table_row', table_row: { cells } };
+  });
+  const out = [];
+  for (let i = 0; i < norm.length; i += C.TABLE_MAX_ROWS)
+   out.push({ object: 'block', type: 'table', table: { table_width: w, has_column_header: hasHeader && i === 0, children: norm.slice(i, i + C.TABLE_MAX_ROWS) } });
+  return out;
+ }
+ const rtStr = (rt) => (rt || []).map(t => t?.text?.content || '').join('');
+ const cellText = (cell) => Array.isArray(cell) ? cell.map(t => t.text?.content || '').join('') : '';
+ function tableToParas(tbl) {
+  const out = [];
+  for (const row of tbl.table?.children || []) {
+   const line = (row.table_row?.cells || []).map(cellText).join(' | ');
+   if (line.trim()) out.push(mkPara(line));
+  }
+  return out;
+ }
+ function stripDeep(blocks) {
+  const out = [];
+  for (const b of blocks) {
+   if (!b) continue;
+   if (b.type === 'table') { out.push(...tableToParas(b)); continue; }
+   const body = b[b.type];
+   if (body && Array.isArray(body.children)) { const kids = body.children; delete body.children; out.push(b); out.push(...stripDeep(kids)); }
+   else out.push(b);
+  }
+  return out;
+ }
+ function flattenToggle(children, depth = 0) {
+  if (depth > C.WALK_DEPTH_MAX) return [];
+  const out = [];
+  for (const b of children) {
+   if (!b) continue;
+   if (b.type === 'toggle') {
+    out.push(mkPara('▸ ' + rtStr(b.toggle?.rich_text)));
+    out.push(...flattenToggle(b.toggle?.children || [], depth + 1));
+   } else if (b.type === 'table') out.push(...tableToParas(b));
+   else out.push(...stripDeep([b]));
+  }
+  return out;
+ }
+ const mkToggle = (summary, children) => {
+  const flat = flattenToggle(children).slice(0, C.BATCH_SIZE);
+  const toggle = { rich_text: toRich(summary) };
+  if (flat.length) toggle.children = flat;
+  return { object: 'block', type: 'toggle', toggle };
+ };
+
+ // ===== 飞书块转换 =====
+ function richToFeishuElements(rt) {
+  const elements = [];
+  for (const item of rt || []) {
+   const text = item.text?.content || '';
+   if (!text) continue;
+   const style = {};
+   const a = item.annotations || {};
+   if (a.bold) style.bold = true;
+   if (a.italic) style.italic = true;
+   if (a.strikethrough) style.strikethrough = true;
+   if (a.underline) style.underline = true;
+   if (a.code) style.inline_code = true;
+   if (item.text?.link?.url) style.link = { url: item.text.link.url };
+   elements.push({ text_run: { content: text, text_element_style: Object.keys(style).length ? style : undefined } });
+  }
+  return elements;
+ }
+ function fsPushText(out, blockType, key, elements) {
+  if (!elements.some(e => (e.text_run?.content || '').trim())) return false;
+  out.push({ block_type: blockType, [key]: { elements } });
+  return true;
+ }
+ function fsLinkPara(text, url) {
+  return { block_type: FS_BLK.TEXT, text: { elements: [{ text_run: { content: text, text_element_style: url ? { link: { url } } : undefined } }] } };
+ }
+ function blocksToFeishu(blocks, ctx, depth = 0) {
+  if (depth > C.FS_BLOCK_DEPTH_MAX) return;
+  for (const block of blocks) {
+   const type = block.type;
+   if (type === 'paragraph') {
+    fsPushText(ctx.out, FS_BLK.TEXT, 'text', richToFeishuElements(block.paragraph?.rich_text));
+   } else if (type.startsWith('heading_')) {
+    const level = Math.min(Math.max(parseInt(type.split('_')[1], 10) || 1, 1), 9);
+    const headingKey = `heading${level}`;
+    fsPushText(ctx.out, FS_BLK[`H${level}`] ?? FS_BLK.TEXT, headingKey, richToFeishuElements(block[type]?.rich_text));
+   } else if (type === 'bulleted_list_item' || type === 'numbered_list_item') {
+    const bullet = type === 'bulleted_list_item';
+    const pushed = fsPushText(ctx.out, bullet ? FS_BLK.BULLET : FS_BLK.ORDERED, bullet ? 'bullet' : 'ordered', richToFeishuElements(block[type]?.rich_text));
+    const kids = block[type]?.children;
+    if (Array.isArray(kids) && kids.length) {
+     const childCtx = { out: [], jobs: [], imgInfo: ctx.imgInfo, nest: [] };
+     blocksToFeishu(kids, childCtx, depth + 1);
+     const nestable = pushed && childCtx.out.length > 0 && childCtx.out.every(b => FS_NESTABLE.has(b.block_type));
+     if (nestable) {
+      ctx.nest.push({ index: ctx.out.length - 1, ctx: childCtx });
+     } else {
+      const offset = ctx.out.length;
+      ctx.out.push(...childCtx.out);
+      for (const j of childCtx.jobs) ctx.jobs.push({ index: offset + j.index, info: j.info });
+      for (const nj of childCtx.nest) ctx.nest.push({ index: offset + nj.index, ctx: nj.ctx });
+     }
+    }
+   } else if (type === 'quote') {
+    fsPushText(ctx.out, FS_BLK.QUOTE, 'quote', richToFeishuElements(block.quote?.rich_text));
+   } else if (type === 'code') {
+    const els = richToFeishuElements(block.code?.rich_text);
+    if (els.length) {
+     const lang = (block.code?.language || 'plain text').toLowerCase();
+     ctx.out.push({ block_type: FS_BLK.CODE, code: { elements: els, style: { language: FEISHU_LANG_MAP[lang] || 1 } } });
+    }
+   } else if (type === 'image') {
+    const url = block.image?.external?.url || '';
+    const info = url ? ctx.imgInfo?.get(url) : null;
+    if (info) { ctx.jobs.push({ index: ctx.out.length, info }); ctx.out.push({ block_type: FS_BLK.IMAGE, image: {} }); }
+    else if (url && !DATA_IMG_RE.test(url)) ctx.out.push(fsLinkPara(`🖼️ 图片: ${url}`, url));
+    else if (url) ctx.out.push({ block_type: FS_BLK.TEXT, text: { elements: [{ text_run: { content: '🖼️ [内嵌图片过大或格式不支持，已略过]' } }] } });
+   } else if (type === 'video' || type === 'embed') {
+    const url = block[type]?.external?.url || block[type]?.url || '';
+    if (url) ctx.out.push(fsLinkPara(`🔗 媒体: ${url}`, url));
+   } else if (type === 'table') {
+    for (const row of block.table?.children || []) {
+     const cells = row.table_row?.cells || [];
+     const text = cells.map(cellText).join(' | ');
+     if (text.trim()) ctx.out.push({ block_type: FS_BLK.TEXT, text: { elements: [{ text_run: { content: text } }] } });
+    }
+   } else if (type === 'divider') {
+    ctx.out.push({ block_type: FS_BLK.DIVIDER, divider: {} });
+   } else if (type === 'toggle') {
+    fsPushText(ctx.out, FS_BLK.TEXT, 'text', richToFeishuElements(block.toggle?.rich_text));
+    const kids = block.toggle?.children;
+    if (Array.isArray(kids) && kids.length) blocksToFeishu(kids, ctx, depth + 1);
+   }
+  }
+ }
+
+ // ===== Markdown 序列化 =====
+ const mdUrl = (u) => String(u || '').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29');
+ function richToMd(rt) {
+  if (!rt) return '';
+  return rt.map(t => {
+   let text = t.text?.content || '';
+   if (!text) return '';
+   const a = t.annotations || {};
+   if (a.code) text = '`' + text + '`';
+   if (a.bold) text = '**' + text + '**';
+   if (a.italic) text = '*' + text + '*';
+   if (a.strikethrough) text = '~~' + text + '~~';
+   if (a.underline) text = '<u>' + text + '</u>';
+   if (t.text?.link?.url) text = `[${text}](${mdUrl(t.text.link.url)})`;
+   return text;
+  }).join('');
+ }
+ // 片段收集到数组后单次 join 返回——循环内 md += 会累计 O(块数) 次拼接，
+ // 长文档（数千块、嵌套列表）时字符串树膨胀且每次拼接产生新串；数组 + join 为线性路径。行为不变。
+ function blocksToMarkdown(blocks, indent = '') {
+  const out = [];
+  for (const b of blocks) {
+   const type = b.type;
+   if (type === 'paragraph') out.push(indent + richToMd(b.paragraph?.rich_text) + '\n\n');
+   else if (type.startsWith('heading_')) { const lv = parseInt(type.split('_')[1], 10) || 1; out.push(indent + '#'.repeat(lv) + ' ' + richToMd(b[type]?.rich_text) + '\n\n'); }
+   else if (type === 'bulleted_list_item') { out.push(indent + '- ' + richToMd(b[type]?.rich_text).replace(/\n/g, '\n  ') + '\n'); if (Array.isArray(b[type]?.children) && b[type].children.length) out.push(blocksToMarkdown(b[type].children, indent + '  ')); }
+   else if (type === 'numbered_list_item') { out.push(indent + '1. ' + richToMd(b[type]?.rich_text).replace(/\n/g, '\n   ') + '\n'); if (Array.isArray(b[type]?.children) && b[type].children.length) out.push(blocksToMarkdown(b[type].children, indent + '   ')); }
+   else if (type === 'quote') out.push(indent + '> ' + richToMd(b.quote?.rich_text).replace(/\n/g, '\n> ') + '\n\n');
+   else if (type === 'code') { const lang = b.code?.language || ''; out.push(indent + '```' + lang + '\n' + rtStr(b.code?.rich_text) + '\n```\n\n'); }
+   else if (type === 'image') { const url = b.image?.external?.url || ''; out.push(DATA_IMG_RE.test(url) ? indent + '🖼️ [内嵌图片(data:)，已略过]\n\n' : indent + `![](${mdUrl(url)})\n\n`); }
+   else if (type === 'video' || type === 'embed') { const url = b[type]?.external?.url || b[type]?.url || ''; out.push(indent + `[媒体链接](${mdUrl(url)})\n\n`); }
+   else if (type === 'table') {
+    const mdCell = (cell) => cellText(cell).replace(/\|/g, '\\|');
+    const rows = b.table?.children || [];
+    if (rows.length > 0) {
+     const firstRow = rows[0].table_row?.cells || [];
+     out.push(indent + '| ' + firstRow.map(mdCell).join(' | ') + ' |\n');
+     out.push(indent + '| ' + firstRow.map(() => '---').join(' | ') + ' |\n');
+     for (let i = 1; i < rows.length; i++) { const cells = rows[i].table_row?.cells || []; out.push(indent + '| ' + cells.map(mdCell).join(' | ') + ' |\n'); }
+     out.push('\n');
+    }
+   }
+   else if (type === 'divider') out.push(indent + '---\n\n');
+   else if (type === 'toggle') out.push(indent + '<details>\n' + indent + '<summary>' + rtStr(b.toggle?.rich_text) + '</summary>\n\n' + blocksToMarkdown(b.toggle?.children || [], indent) + '\n' + indent + '</details>\n\n');
+  }
+  return out.join('');
+ }
+
+ const normalizeObsidianBase = (raw) => {
+  let b = String(raw || '').trim() || 'http://127.0.0.1:27123';
+  if (!/^https?:\/\//i.test(b)) b = 'http://' + b;
+  return b.replace(/\/+$/, '').replace(/\/vault$/i, '');
+ };
+
+ // ===== 设置读取与存储 =====
  function readSettings() {
   return {
    notionToken: GM_getValue(STORAGE.TOKEN, ''),
@@ -314,23 +642,197 @@
    obsApiUrl: GM_getValue(STORAGE.OBSIDIAN_API_URL, 'http://127.0.0.1:27123'),
    obsApiKey: GM_getValue(STORAGE.OBSIDIAN_API_KEY, ''),
    obsFolder: GM_getValue(STORAGE.OBSIDIAN_FOLDER, ''),
-   blocklist: GM_getValue(STORAGE.BLOCKLIST, ''), // v5.6.0
-   domainTags: GM_getValue(STORAGE.DOMAIN_TAGS, ''), // v5.6.0
-   sendProfile: GM_getValue(STORAGE.SEND_PROFILE, 'gentle'), // v5.7.0：默认温和档（降低并发）
+   blocklist: GM_getValue(STORAGE.BLOCKLIST, ''),
+   domainTags: GM_getValue(STORAGE.DOMAIN_TAGS, ''),
+   sendProfile: GM_getValue(STORAGE.SEND_PROFILE, 'gentle'),
   };
 }
  let S = readSettings();
  const refreshSettings = () => { S = readSettings(); };
+ const getProfile = () => SEND_PROFILES[S.sendProfile] || SEND_PROFILES.gentle;
 
- // ============================================================
- // 主初始化
- // ============================================================
+ // ===== UI 样式与模板 =====
+ const PANEL_CSS = `:host{all:initial;color-scheme:light dark;--c-bg:#fff;--c-text:#333;--c-text-sec:#555;--c-border:#ddd;--c-border-hover:#bfbfbf;--c-input-bg:#fff;--c-bg-sec:#f0f0f0;--c-pv-bg:#fafafa;--c-pv-text:#333;--c-pv-border:#eee;--c-code-bg:#f0f0f0;--c-th-bg:#e8e8e8;--c-td-border:#ccc;--c-btn-sec-bg:#f0f0f0;--c-btn-sec-text:#333;--c-btn-ghost-bg:#fff;--c-btn-ghost-text:#1667bb;--c-btn-ghost-border:#2383e2;--c-help:#6f6f6f;--c-kbd-bg:#f0f0f0;--c-kbd-border:#ccc;--c-progress-bg:#eee;--c-err-bg:#fff5f5;--c-err-border:#ffcdd2;--c-err-text:#d32f2f;--c-err-succ-bg:#f1f8e9;--c-err-succ-border:#c8e6c9;--c-err-succ-text:#2d7d46;--c-accent:#2383e2;--c-accent-hover:#1b6ec2;--c-accent-strong:#1b6ec2;--c-accent-ink:#1667bb;--c-toast-info:#b45309;--c-ring:rgba(27,110,194,.16);--c-success:#2d7d46;--c-success-solid:#2d7d46;--c-danger:#d32f2f;--c-danger-solid:#c62828;--c-danger-solid-hover:#b71c1c;--c-warn:#b45309;--c-accent-soft:#eaf2fb;--c-hl-fill:rgba(35,131,226,.1);--c-hl-inner:rgba(255,255,255,.6);--c-hl-ring:rgba(35,131,226,.22);--c-focus-ring:rgba(35,131,226,.45);--c-scrim:rgba(0,0,0,.6);--c-tip-bg:rgba(0,0,0,.85);--c-tip-text:#fff;--c-placeholder:#767676;--c-btn-disabled-bg:#f0f0f0;--c-btn-disabled-text:#555;--c-brand-fs:#2c62e0;--c-brand-obs:#7c3aed;--sh-float:0 4px 12px rgba(0,0,0,.15);--sh-modal:0 24px 48px rgba(15,23,42,.16),0 4px 12px rgba(15,23,42,.08);--dur-fast:.15s;--dur-base:.2s;--ease:cubic-bezier(.2,0,.2,1)}
+*{box-sizing:border-box;margin:0;padding:0;line-height:1.5;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+::placeholder{color:var(--c-placeholder);opacity:1}
+.nc-btn{position:fixed;width:${C.BTN_SIZE}px;height:${C.BTN_SIZE}px;border-radius:50%;background:var(--c-accent);color:#fff;border:2px solid #fff;cursor:pointer;box-shadow:var(--sh-float);font-size:24px;display:flex;align-items:center;justify-content:center;transition:left var(--dur-base) var(--ease),top var(--dur-base) var(--ease),opacity var(--dur-base) var(--ease),transform var(--dur-fast) var(--ease);user-select:none;touch-action:none;pointer-events:auto;left:auto;right:20px;top:auto;bottom:20px;will-change:left,top}
+.nc-btn:hover{background:var(--c-accent-hover);transform:scale(1.05)}
+.nc-btn:active{transform:scale(.97)}
+.nc-btn.edge{opacity:.72}
+.nc-btn:focus-visible{outline:2px solid #fff;outline-offset:2px;box-shadow:0 0 0 4px var(--c-focus-ring)}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+.nc-tip{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--c-tip-bg);color:var(--c-tip-text);padding:10px 20px;border-radius:24px;font-size:14px;pointer-events:none;box-shadow:var(--sh-float);display:none;z-index:1;max-width:90vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nc-hl{position:fixed;top:0;left:0;width:0;height:0;border:3px solid var(--c-accent);background:var(--c-hl-fill);box-shadow:0 0 0 1px var(--c-hl-inner),0 0 0 5px var(--c-hl-ring);pointer-events:none;display:none;will-change:transform}
+.nc-mask{position:fixed;top:0;left:0;width:100%;height:100%;z-index:-1;display:none;cursor:crosshair;pointer-events:auto}
+.nc-ov{position:fixed;top:0;left:0;width:100%;height:100%;background:var(--c-scrim);display:none;align-items:center;justify-content:center;pointer-events:auto}
+.nc-ov.nc-ov-tr{background:transparent;align-items:flex-start;justify-content:flex-end;pointer-events:none;padding:20px}
+.nc-ov.nc-ov-tr .nc-modal{pointer-events:auto;width:420px;max-width:calc(100vw - 40px);max-height:calc(100vh - 40px);box-shadow:var(--sh-modal);animation:nc-slide-in .25s var(--ease)}
+.nc-ov.nc-ov-tr .nc-modal.minimized{width:auto}
+@keyframes nc-slide-in{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+@keyframes nc-fade-in{from{opacity:0;transform:scale(.98)}to{opacity:1;transform:scale(1)}}
+.nc-modal{background:var(--c-bg);padding:28px;border-radius:12px;width:580px;max-width:92vw;max-height:88vh;overflow-y:auto;box-shadow:var(--sh-modal);display:flex;flex-direction:column;gap:14px;color:var(--c-text);animation:nc-fade-in .18s var(--ease)}
+.nc-modal h2{font-size:18px;color:var(--c-text);position:sticky;top:0;z-index:2;background:var(--c-bg)}
+.nc-modal-h2{display:flex;align-items:center;justify-content:space-between}
+.nc-min{background:none;border:none;cursor:pointer;font-size:16px;color:var(--c-help);padding:2px 8px;line-height:1;border-radius:4px;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.nc-min:hover{background:var(--c-bg-sec);color:var(--c-accent)}
+.nc-min:active{transform:scale(.94)}
+.nc-min:disabled{color:var(--c-btn-disabled-text);cursor:not-allowed}
+.nc-modal.minimized{padding:12px 24px;gap:0;max-height:none;overflow:visible}
+.nc-modal.minimized h2 ~ *{display:none !important}
+.nc-modal h3{font-size:15px;color:var(--c-text-sec);margin-top:16px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--c-border);padding-bottom:4px}
+.nc-modal label{font-size:13px;color:var(--c-text-sec);font-weight:600;margin-top:4px}
+.nc-modal input,.nc-modal select,.nc-modal textarea{width:100%;padding:10px;border:1px solid var(--c-border);border-radius:6px;font-size:14px;background:var(--c-input-bg);color:var(--c-text);transition:border-color var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease)}
+.nc-modal input:hover,.nc-modal select:hover,.nc-modal textarea:hover{border-color:var(--c-border-hover)}
+.nc-modal input:focus,.nc-modal select:focus,.nc-modal textarea:focus{border-color:var(--c-accent);box-shadow:0 0 0 3px var(--c-ring);outline:none}
+.nc-modal textarea{resize:vertical;min-height:56px;line-height:1.5;font-family:inherit}
+.nc-row{display:flex;flex-wrap:wrap;gap:8px 10px;justify-content:flex-end;align-items:center}
+.nc-modal > .nc-row:last-child{position:sticky;bottom:0;background:var(--c-bg);margin-top:12px;padding-top:4px}
+.nc-b{padding:9px 18px;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;transition:filter var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease);white-space:nowrap}
+.nc-b:active{transform:scale(.97)}
+.nc-b1{background:var(--c-accent-strong);color:#fff}
+.nc-b1:hover{filter:brightness(0.92)}
+.nc-b2{background:var(--c-btn-sec-bg);color:var(--c-btn-sec-text)}
+.nc-b2:hover{filter:brightness(0.95)}
+.nc-bk{background:var(--c-btn-ghost-bg);color:var(--c-btn-ghost-text);border:1.5px solid var(--c-btn-ghost-border)}
+.nc-bk:hover{filter:brightness(0.95)}
+.nc-bk-brand-fs{color:var(--c-brand-fs);border-color:var(--c-brand-fs)}
+.nc-bk-brand-obs{color:var(--c-brand-obs);border-color:var(--c-brand-obs)}
+.nc-br{background:var(--c-danger-solid);color:#fff}
+.nc-br:hover{background:var(--c-danger-solid-hover)}
+.nc-b:disabled,.nc-br:disabled,.nc-tb:disabled{background:var(--c-btn-disabled-bg);color:var(--c-btn-disabled-text);border-color:var(--c-border);cursor:not-allowed;filter:none;opacity:1;transform:none}
+.nc-b:disabled:hover,.nc-br:disabled:hover,.nc-tb:disabled:hover{filter:none;transform:none;background:var(--c-btn-disabled-bg)}
+.nc-help{font-size:12px;color:var(--c-help);margin-top:-6px;line-height:1.4}
+.nc-help a{color:var(--c-accent-ink)}
+.nc-tw{position:relative;display:flex;align-items:center}
+.nc-tw input{flex:1;padding-right:40px}
+.nc-tv{position:absolute;right:8px;background:none;border:none;cursor:pointer;font-size:16px;color:var(--c-help);padding:4px;border-radius:4px;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+.nc-tv:hover{background:var(--c-bg-sec);color:var(--c-accent)}
+.nc-tv:active{transform:scale(.94)}
+.nc-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--c-text-sec);font-weight:400;cursor:pointer;white-space:nowrap}
+.nc-switch:hover{color:var(--c-accent)}
+.nc-switch input{width:auto;accent-color:var(--c-accent)}
+.nc-pv{border:1px solid var(--c-pv-border);border-radius:8px;padding:14px;margin-top:8px;max-height:250px;overflow-y:auto;background:var(--c-pv-bg);font-size:13px;line-height:1.65;user-select:text;-webkit-user-select:text}
+.nc-pv:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+.nc-pv a{color:var(--c-accent-ink);text-decoration:underline}
+.nc-pv hr{border:none;border-top:1px dashed var(--c-border);margin:6px 0}
+.nc-pv img{max-width:100%;max-height:150px;display:block;margin:8px 0;border-radius:4px;background:var(--c-progress-bg);min-height:24px}
+.nc-pv-img-err{border:1px dashed var(--c-border);border-radius:4px;background:var(--c-bg-sec);color:var(--c-help);font-size:12px;padding:8px 10px;text-align:center;margin:8px 0}
+.nc-pv p{margin:4px 0;color:var(--c-pv-text);white-space:pre-wrap}
+.nc-pv h1,.nc-pv h2,.nc-pv h3{margin:8px 0 4px;color:var(--c-text)}
+.nc-pv h1{font-size:1.4em}.nc-pv h2{font-size:1.2em}.nc-pv h3{font-size:1.1em}
+.nc-pv li{margin-left:1.5em;list-style:disc}
+.nc-pv blockquote{border-left:3px solid var(--c-accent);padding-left:10px;color:var(--c-text-sec);margin:8px 0}
+.nc-pv pre{background:var(--c-code-bg);padding:8px;border-radius:4px;white-space:pre-wrap;font-family:monospace}
+.nc-pv table{border-collapse:collapse;width:100%}
+.nc-pv table th{font-weight:700;background:var(--c-th-bg)}
+.nc-pv table td,.nc-pv table th{border:1px solid var(--c-td-border);padding:4px}
+.nc-pv-kids{margin-left:1.2em;border-left:2px solid var(--c-pv-border);padding-left:6px}
+.nc-mp{color:var(--c-accent-ink);font-weight:600;margin:8px 0;background:var(--c-accent-soft);padding:6px 10px;border-radius:4px}
+.nc-pi{position:relative;margin:4px 0}
+.nc-pd{position:absolute;top:2px;right:2px;width:24px;height:24px;background:var(--c-danger-solid);color:#fff;border:none;border-radius:50%;font-size:13px;line-height:24px;text-align:center;cursor:pointer;opacity:0;transition:opacity var(--dur-fast) var(--ease);z-index:2;pointer-events:auto}
+.nc-pi:hover .nc-pd,.nc-pi:focus-within .nc-pd,.nc-pd:focus-visible{opacity:1}
+.nc-pd:active{transform:scale(.92)}
+.nc-ok{font-size:15px;color:var(--c-success);font-weight:600;text-align:center;margin:8px 0}
+.nc-err{font-size:13px;color:var(--c-err-text);background:var(--c-err-bg);border:1px solid var(--c-err-border);border-radius:8px;padding:12px;margin:8px 0;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.5}
+.nc-err-succ{font-size:13px;color:var(--c-err-succ-text);background:var(--c-err-succ-bg);border:1px solid var(--c-err-succ-border);border-radius:8px;padding:10px;margin:4px 0;line-height:1.5}
+.nc-err-title{color:var(--c-danger)}
+.nc-err-title.is-warn{color:var(--c-warn)}
+.nc-tc{position:fixed;top:20px;right:20px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.nc-t{padding:12px 20px;border-radius:6px;color:#fff;font-size:14px;box-shadow:var(--sh-float);pointer-events:auto;animation:nc-in .3s var(--ease);display:flex;align-items:center;gap:8px;max-width:300px;word-break:break-word}
+.nc-ts{background:var(--c-success-solid)}.nc-te{background:var(--c-danger-solid)}.nc-ti{background:var(--c-toast-info)}
+.nc-ts::before{content:'✓';font-weight:700;flex:none}
+.nc-te::before{content:'✕';font-weight:700;flex:none}
+.nc-ti::before{content:'ⓘ';font-weight:700;flex:none}
+.nc-info{font-size:12px;color:var(--c-help);text-align:right;margin-top:-8px}
+.nc-progress{margin-top:8px;height:6px;background:var(--c-progress-bg);border-radius:3px;overflow:hidden;display:none}
+.nc-progress-bar{height:100%;background:var(--c-accent);border-radius:3px;transition:width .3s var(--ease);width:0}
+.nc-shortcuts{font-size:12px;color:var(--c-help);margin-top:4px;line-height:1.6}
+.nc-shortcuts kbd{background:var(--c-kbd-bg);border:1px solid var(--c-kbd-border);border-radius:3px;padding:1px 5px;font-size:11px;font-family:monospace}
+.nc-dirty{font-size:12px;color:var(--c-warn);margin-top:4px;display:none}
+.nc-h3r{display:flex;align-items:center;gap:6px}
+.nc-hist{margin-top:6px;display:flex;flex-direction:column;gap:4px}
+.nc-hist-item{display:flex;align-items:baseline;gap:8px;font-size:12px;line-height:1.5}
+.nc-hist-time{color:var(--c-help);flex:none;font-family:monospace;font-size:12px}
+.nc-hist-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nc-hist-plat{margin-left:auto;flex:none;color:var(--c-accent-ink)}
+.nc-hist-empty{font-size:12px;color:var(--c-help);text-align:center;padding:18px 10px;border:1px dashed var(--c-border);border-radius:6px}
+.nc-empty{padding:30px 12px;text-align:center;color:var(--c-help);font-size:12px}
+.nc-empty b{display:block;font-weight:600;color:var(--c-text-sec);font-size:13px;margin-bottom:4px}
+.nc-tb{padding:3px 10px;font-size:12px;border:1px solid var(--c-btn-ghost-border);background:var(--c-btn-ghost-bg);color:var(--c-btn-ghost-text);border-radius:4px;cursor:pointer;font-weight:600;transition:filter var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
+.nc-tb:hover{filter:brightness(.95);background:var(--c-accent-soft)}
+.nc-tb:active{transform:scale(.96)}
+@keyframes nc-in{from{opacity:0;transform:translateX(50px)}to{opacity:1;transform:translateX(0)}}
+@media (pointer:coarse){.nc-tb{min-height:28px;padding:5px 12px}.nc-min{padding:6px 10px}.nc-tv{padding:8px}}
+@media (max-width:520px){.nc-ov.nc-ov-tr{align-items:flex-end;justify-content:center;padding:10px}.nc-ov.nc-ov-tr .nc-modal{width:100%;max-width:none;max-height:70vh}.nc-modal{padding:18px;gap:12px}.nc-modal h3{margin-top:12px}.nc-tc{left:10px;right:10px;top:10px}.nc-t{max-width:none}}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}}
+@media (prefers-color-scheme: dark) {
+ :host{--c-bg:#1e1e1e;--c-text:#e0e0e0;--c-text-sec:#bbb;--c-border:#444;--c-border-hover:#5a5a5a;--c-input-bg:#2a2a2a;--c-bg-sec:#333;--c-pv-bg:#2a2a2a;--c-pv-text:#ddd;--c-pv-border:#444;--c-code-bg:#333;--c-th-bg:#383838;--c-td-border:#555;--c-btn-sec-bg:#333;--c-btn-sec-text:#e0e0e0;--c-btn-ghost-bg:#1e1e1e;--c-btn-ghost-text:#5b9fe6;--c-btn-ghost-border:#5b9fe6;--c-help:#9a9a9a;--c-kbd-bg:#333;--c-kbd-border:#555;--c-progress-bg:#444;--c-err-bg:#3a1a1a;--c-err-border:#5c2828;--c-err-text:#ff6b6b;--c-err-succ-bg:#1a3a1a;--c-err-succ-border:#2d5c2d;--c-err-succ-text:#6bdf6b;--c-accent:#5b9fe6;--c-accent-hover:#4a8ed5;--c-accent-strong:#5b9fe6;--c-accent-ink:#5b9fe6;--c-toast-info:#b45309;--c-ring:rgba(91,159,230,.2);--c-success:#6bdf6b;--c-success-solid:#2d7d46;--c-danger:#ff6b6b;--c-danger-solid:#b71c1c;--c-danger-solid-hover:#8e1414;--c-warn:#f0a860;--c-accent-soft:#243447;--c-hl-fill:rgba(91,159,230,.16);--c-hl-inner:rgba(255,255,255,.35);--c-hl-ring:rgba(91,159,230,.28);--c-focus-ring:rgba(91,159,230,.5);--c-scrim:rgba(0,0,0,.72);--c-tip-bg:rgba(0,0,0,.88);--c-tip-text:#fff;--c-placeholder:#9a9a9a;--c-btn-disabled-bg:#2f2f2f;--c-btn-disabled-text:#9a9a9a;--c-brand-fs:#5b95ff;--c-brand-obs:#a78bfa;--sh-float:0 4px 12px rgba(0,0,0,.45);--sh-modal:0 24px 48px rgba(0,0,0,.55),0 4px 12px rgba(0,0,0,.35);--dur-fast:.15s;--dur-base:.2s;--ease:cubic-bezier(.2,0,.2,1)}
+ .nc-b1{color:#0d2137}
+}
+`;
+
+ const PANEL_HTML = `
+
+<button class="nc-btn" title="左键选取 / 右键设置 / Alt+Shift+N">✂️</button>
+<div class="nc-tip">🔍 悬停高亮元素，单击提取内容 (Esc取消)</div>
+<div class="nc-mask"></div><div class="nc-hl"></div>
+<div class="nc-ov" id="ov-set" role="dialog" aria-modal="true" aria-labelledby="ttl-set"><div class="nc-modal">
+ <h2 id="ttl-set">⚙️ Notion / 飞书 / Obsidian 配置</h2>
+ <label for="in-blocklist">🚫 禁用站点（逗号分隔，命中则本脚本不启用）</label><input type="text" id="in-blocklist" placeholder="example.com, *.example.org" autocomplete="off">
+ <div class="nc-help">支持 example.com（含子域）与 *.example.com（仅子域）。保存后刷新页面生效。</div>
+ <label for="in-send-profile">🚦 发送节奏</label><select id="in-send-profile"><option value="gentle">温和 · 降低并发（推荐，规避平台接口限流）</option><option value="standard">标准 · 更快</option></select>
+ <div class="nc-help">温和档：三平台错峰启动 700ms · 图片下载并发 2 · API 写入间隔 550ms；标准档：300ms / 3 / 350ms。</div>
+ <h3><span>📕 Notion</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-notion"> 启用</label><button class="nc-tb" id="btn-test-notion" title="验证 Token 与数据库连通性（读取当前表单值，无需先保存）">🔌 测试</button></span></h3>
+ <label for="in-tok">Integration Token</label><div class="nc-tw"><input type="password" id="in-tok" placeholder="secret_... 或 ntn_..." autocomplete="new-password"><button class="nc-tv nc-tv-notion" type="button" aria-label="显示或隐藏 Notion Token" title="显示/隐藏">👁️</button></div>
+ <label for="in-db">Database ID</label><input type="text" id="in-db" placeholder="32 位 ID 或数据库链接" autocomplete="off">
+ <div class="nc-help">⚠️ 必须在 Notion 数据库 Connections 中添加 Integration。</div>
+ <label for="in-tag">标签属性名 (可选)</label><input type="text" id="in-tag" placeholder="Tags" autocomplete="off">
+ <h3><span>🪁 飞书</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-feishu"> 启用</label><button class="nc-tb" id="btn-test-feishu" title="验证凭证 + 创建/回收测试文档（读取当前表单值）">🔌 测试</button></span></h3>
+ <label for="in-fs-appid">App ID</label><input type="text" id="in-fs-appid" placeholder="App ID" autocomplete="off">
+ <label for="in-fs-secret">App Secret</label><div class="nc-tw"><input type="password" id="in-fs-secret" placeholder="App Secret" autocomplete="new-password"><button class="nc-tv nc-tv-fs" type="button" aria-label="显示或隐藏飞书 App Secret" title="显示/隐藏">👁️</button></div>
+ <label for="in-fs-folder">文件夹 Token</label><input type="text" id="in-fs-folder" placeholder="Folder Token" autocomplete="off">
+ <div class="nc-help">⚠️ Token 明文存储于本地，请勿在公共电脑保存。</div>
+ <h3><span>💎 Obsidian</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-obsidian"> 启用</label><button class="nc-tb" id="btn-test-obsidian" title="探测 Local REST API 连通性与 API Key（读取当前表单值）">🔌 测试</button></span></h3>
+ <label for="in-obs-api-url">API Base URL</label><input type="text" id="in-obs-api-url" placeholder="http://127.0.0.1:27123" autocomplete="off">
+ <label for="in-obs-api-key">API Key</label><div class="nc-tw"><input type="password" id="in-obs-api-key" placeholder="Local REST API 插件中获取" autocomplete="new-password"><button class="nc-tv nc-tv-obs" type="button" aria-label="显示或隐藏 Obsidian API Key" title="显示/隐藏">👁️</button></div>
+ <label for="in-obs-folder">保存路径</label><input type="text" id="in-obs-folder" placeholder="例如: Clippings" autocomplete="off">
+ <div class="nc-help">💡 需安装 <b>Local REST API</b> 插件并启用 HTTP 端口(27123)。<br>💡 写入采用串行队列 + 自动重试；失败后可在弹窗中一键复制 Markdown 或重试。</div>
+ <div class="nc-row"><button class="nc-tb" id="btn-testall" title="按顺序逐个测试已配置平台（读取当前表单值，无需先保存）；未配置的平台自动跳过并汇总">🔌 测试全部</button></div>
+ <h3><span>🏷️ 域名默认标签</span></h3>
+ <textarea id="in-domain-tags" rows="3" aria-label="域名默认标签（每行一条：域名=标签1,标签2）" placeholder="每行一条：域名=标签1,标签2&#10;zhihu.com=阅读,知乎&#10;github.com=代码"></textarea>
+ <div class="nc-help">发送前按当前站点域名（含子域）自动预填标签；手动输入优先于自动预填。</div>
+ <h3><span>💾 配置备份</span><span class="nc-h3r"><button class="nc-tb" id="btn-exp" title="将全部配置导出为 JSON 文件下载">导出</button><button class="nc-tb" id="btn-imp" title="从 JSON 文件导入配置到当前表单">导入</button></span></h3>
+ <div class="nc-help">脚本配置按站点独立存储，多站点使用时可用此功能同步。导出文件含 Token 明文请妥善保管；导入仅回填表单，核对后需点击「保存设置」生效。</div>
+ <input type="file" id="in-imp-file" accept=".json,application/json" style="display:none">
+ <h3><span>🕘 最近发送</span><span class="nc-h3r"><button class="nc-tb" id="btn-hist-clear" title="清空全部本地发送历史">清空</button></span></h3>
+ <div class="nc-hist" id="hist-list"></div>
+ <div class="nc-shortcuts"><strong>快捷键</strong><br>🖱️ 左键拖拽 · 右键设置 · Alt+Shift+N 选取<br>⌨️ Esc 取消 · ↑/↓ 调整选取范围 · Ctrl+Enter 发送 · Ctrl+A 全选</div>
+ <div class="nc-dirty" id="dirty-flag">⚠️ 有未保存的更改</div>
+ <div class="nc-row"><button class="nc-b nc-b2" id="btn-sc">关闭</button><button class="nc-b nc-b1" id="btn-ss">保存设置</button></div>
+</div></div>
+<div class="nc-ov nc-ov-tr" id="ov-cfm" role="dialog" aria-modal="true" aria-labelledby="ttl-cfm"><div class="nc-modal" id="modal-cfm">
+ <h2 class="nc-modal-h2"><span id="ttl-cfm">✂️ 确认发送</span><button class="nc-min" id="btn-min" type="button" aria-label="最小化确认发送面板" title="最小化">🔽</button></h2>
+ <label for="in-title">页面标题</label><input type="text" id="in-title" autocomplete="off">
+ <label id="lb-pv">内容预览</label><div class="nc-pv" id="pv" tabindex="0" role="region" aria-labelledby="lb-pv"></div><div class="nc-info" id="pv-count"></div>
+ <div class="nc-progress" id="pg" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="nc-progress-bar" id="pg-bar"></div></div><div class="nc-info" id="pg-text" role="status" style="display:none"></div>
+ <label for="in-tags">标签 (逗号分隔)</label><input type="text" id="in-tags" placeholder="阅读, 技术" autocomplete="off">
+ <div class="nc-row"><button class="nc-b nc-bk" id="btn-back">↩ 重选</button><button class="nc-b nc-b2" id="btn-add" title="返回页面继续选取，追加到当前内容末尾">➕ 追加</button><button class="nc-b nc-b2" id="btn-copy">📋 复制</button><button class="nc-b nc-b2" id="btn-cmd" title="复制整篇剪藏为 Markdown（含 frontmatter）">📄 复制 MD</button><span style="flex:1"></span><button class="nc-b nc-b2" id="btn-cc">取消</button><button class="nc-b nc-b1" id="btn-cs">发送</button></div>
+</div></div>
+<div class="nc-ov nc-ov-tr" id="ov-ok" role="dialog" aria-modal="true" aria-labelledby="ttl-ok"><div class="nc-modal" style="text-align:center;gap:16px">
+ <h2 id="ttl-ok">✅ 发送完成！</h2><p class="nc-ok" id="ok-msg" role="status"></p>
+ <div class="nc-row" style="justify-content:center;flex-wrap:wrap"><button class="nc-b nc-b1" id="btn-oo-notion" style="display:none">打开 Notion</button><button class="nc-b nc-bk nc-bk-brand-fs" id="btn-oo-feishu" style="display:none">打开飞书</button><button class="nc-b nc-bk nc-bk-brand-obs" id="btn-oo-obsidian" style="display:none">打开 Obsidian</button><button class="nc-b nc-b2" id="btn-oc">关闭</button></div>
+</div></div>
+<div class="nc-ov nc-ov-tr" id="ov-err" role="dialog" aria-modal="true" aria-labelledby="err-title"><div class="nc-modal" style="text-align:center;gap:12px">
+ <h2 id="err-title" class="nc-err-title">❌ 发送失败</h2><div class="nc-err-succ" id="err-succ" style="display:none"></div><div class="nc-err" id="err-detail"></div>
+ <div class="nc-row" style="justify-content:center;flex-wrap:wrap"><button class="nc-b nc-br" id="btn-retry">🔄 重试</button><button class="nc-b nc-b2" id="btn-err-md" style="display:none">📋 复制 Markdown</button><button class="nc-b nc-b2" id="btn-err-copy">📋 复制错误</button><button class="nc-b nc-b2" id="btn-err-close">关闭</button></div>
+</div></div>
+<div class="nc-tc" id="tc" role="status" aria-live="polite" aria-atomic="false"></div>`;
+
+ // ===== 主初始化 =====
  function ncInit() {
   if (isSensitiveHost(location.hostname)) return;
-  // v5.6.0：用户自定义黑名单——命中则本站点不启用（设置保存后刷新页面生效）
   if (isUserBlocked(location.hostname, S.blocklist)) return;
 
-  // 重复注入时移除旧 host
   const old = document.getElementById('nc-host'); if (old) old.remove();
   const host = document.createElement('div'); host.id = 'nc-host';
   host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;';
@@ -345,7 +847,6 @@
   const isTwitterStatus = () => isTwitter && location.pathname.includes('/status/');
   const $ = (s, b = shadow) => b.querySelector(s);
 
-  // v5.2.0：优先 og:title 作为剪藏标题（避免站点在 document.title 追加营销后缀）
   const pageTitle = () => {
    const og = document.querySelector('meta[property="og:title"]')?.content?.trim();
    return og || document.title || '';
@@ -353,136 +854,12 @@
 
   // ---------- 样式 ----------
   const style = document.createElement('style');
-  style.textContent = `
-:host{all:initial;--c-bg:#fff;--c-text:#333;--c-text-sec:#555;--c-border:#ddd;--c-input-bg:#fff;--c-bg-sec:#f0f0f0;--c-pv-bg:#fafafa;--c-pv-text:#333;--c-pv-border:#eee;--c-code-bg:#f0f0f0;--c-th-bg:#e8e8e8;--c-td-border:#ccc;--c-btn-sec-bg:#f0f0f0;--c-btn-sec-text:#333;--c-btn-ghost-bg:#fff;--c-btn-ghost-text:#2383e2;--c-btn-ghost-border:#2383e2;--c-help:#888;--c-kbd-bg:#f0f0f0;--c-kbd-border:#ccc;--c-progress-bg:#eee;--c-err-bg:#fff5f5;--c-err-border:#ffcdd2;--c-err-text:#d32f2f;--c-err-succ-bg:#f1f8e9;--c-err-succ-border:#c8e6c9;--c-err-succ-text:#2d7d46;--c-accent:#2383e2;--c-accent-hover:#1b6ec2}
-*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-.nc-btn{position:fixed;width:${C.BTN_SIZE}px;height:${C.BTN_SIZE}px;border-radius:50%;background:var(--c-accent);color:#fff;border:2px solid #fff;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);font-size:24px;display:flex;align-items:center;justify-content:center;transition:left .25s ease,top .25s ease,opacity .2s ease;user-select:none;touch-action:none;pointer-events:auto;left:auto;right:20px;top:auto;bottom:20px;will-change:left,top}
-.nc-btn:hover{background:var(--c-accent-hover)}
-.nc-btn.edge{opacity:.5}
-.nc-tip{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.85);color:#fff;padding:10px 20px;border-radius:24px;font-size:14px;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.2);display:none;z-index:1;max-width:90vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.nc-hl{position:fixed;top:0;left:0;width:0;height:0;border:3px solid var(--c-accent);background:rgba(35,131,226,.08);pointer-events:none;display:none;will-change:transform}
-.nc-mask{position:fixed;top:0;left:0;width:100%;height:100%;z-index:-1;display:none;cursor:crosshair;pointer-events:auto}
-.nc-ov{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;pointer-events:auto}
-.nc-ov.nc-ov-tr{background:transparent;align-items:flex-start;justify-content:flex-end;pointer-events:none;padding:20px}
-.nc-ov.nc-ov-tr .nc-modal{pointer-events:auto;width:420px;max-width:calc(100vw - 40px);max-height:calc(100vh - 40px);box-shadow:0 8px 32px rgba(0,0,0,.15),0 2px 8px rgba(0,0,0,.08);animation:nc-slide-in .25s ease}
-.nc-ov.nc-ov-tr .nc-modal.minimized{width:auto}
-@keyframes nc-slide-in{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
-.nc-modal{background:var(--c-bg);padding:24px;border-radius:12px;width:580px;max-width:92vw;max-height:88vh;overflow-y:auto;box-shadow:0 10px 25px rgba(0,0,0,.2);display:flex;flex-direction:column;gap:12px;color:var(--c-text)}
-.nc-modal h2{font-size:18px;color:var(--c-text)}
-.nc-modal-h2{display:flex;align-items:center;justify-content:space-between}
-.nc-min{background:none;border:none;cursor:pointer;font-size:16px;color:#666;padding:2px 8px;line-height:1;border-radius:4px;transition:background .15s,color .15s}
-.nc-min:hover{background:var(--c-bg-sec);color:var(--c-accent)}
-.nc-modal.minimized{padding:12px 24px;gap:0;max-height:none;overflow:visible}
-.nc-modal.minimized h2 ~ *{display:none !important}
-.nc-modal h3{font-size:15px;color:var(--c-text-sec);margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--c-border);padding-bottom:4px}
-.nc-modal label{font-size:13px;color:var(--c-text-sec);font-weight:600;margin-top:4px}
-.nc-modal input,.nc-modal select,.nc-modal textarea{width:100%;padding:10px;border:1px solid var(--c-border);border-radius:6px;font-size:14px;background:var(--c-input-bg);color:var(--c-text)}
-.nc-modal textarea{resize:vertical;min-height:56px;line-height:1.5;font-family:inherit}
-.nc-row{display:flex;gap:10px;justify-content:flex-end;margin-top:12px;align-items:center}
-.nc-b{padding:9px 18px;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;transition:filter .15s,transform .1s;white-space:nowrap}
-.nc-b:active{transform:scale(.97)}
-.nc-b1{background:var(--c-accent);color:#fff}.nc-b1:hover{filter:brightness(0.9)}
-.nc-b1:disabled{filter:brightness(1.2);cursor:not-allowed}
-.nc-b2{background:var(--c-btn-sec-bg);color:var(--c-btn-sec-text)}.nc-b2:hover{filter:brightness(0.95)}
-.nc-bk{background:var(--c-btn-ghost-bg);color:var(--c-btn-ghost-text);border:1.5px solid var(--c-btn-ghost-border)}.nc-bk:hover{filter:brightness(0.95)}
-.nc-br{background:#d32f2f;color:#fff}.nc-br:hover{background:#b71c1c}
-.nc-br:disabled{filter:brightness(1.2);cursor:not-allowed}
-.nc-help{font-size:12px;color:var(--c-help);margin-top:-6px;line-height:1.4}
-.nc-help a{color:var(--c-accent)}
-.nc-tw{position:relative;display:flex;align-items:center}
-.nc-tw input{flex:1;padding-right:40px}
-.nc-tv{position:absolute;right:8px;background:none;border:none;cursor:pointer;font-size:16px;color:#666;padding:4px}
-.nc-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--c-text-sec);font-weight:400;cursor:pointer;white-space:nowrap}
-.nc-switch input{width:auto;accent-color:var(--c-accent)}
-.nc-pv{border:1px solid var(--c-pv-border);border-radius:8px;padding:12px;margin-top:8px;max-height:250px;overflow-y:auto;background:var(--c-pv-bg);font-size:13px;line-height:1.6;user-select:text;-webkit-user-select:text;outline:none}
-.nc-pv img{max-width:100%;max-height:150px;display:block;margin:8px 0;border-radius:4px}
-.nc-pv p{margin:4px 0;color:var(--c-pv-text);white-space:pre-wrap}
-.nc-pv h1,.nc-pv h2,.nc-pv h3{margin:8px 0 4px;color:var(--c-text)}
-.nc-pv h1{font-size:1.4em}.nc-pv h2{font-size:1.2em}.nc-pv h3{font-size:1.1em}
-.nc-pv li{margin-left:1.5em;list-style:disc}
-.nc-pv blockquote{border-left:3px solid var(--c-accent);padding-left:10px;color:var(--c-text-sec);margin:8px 0}
-.nc-pv pre{background:var(--c-code-bg);padding:8px;border-radius:4px;white-space:pre-wrap;font-family:monospace}
-.nc-pv table{border-collapse:collapse;width:100%}
-.nc-pv table th{font-weight:700;background:var(--c-th-bg)}
-.nc-pv table td,.nc-pv table th{border:1px solid var(--c-td-border);padding:4px}
-.nc-pv-kids{margin-left:1.2em;border-left:2px solid var(--c-pv-border);padding-left:6px}
-.nc-mp{color:var(--c-accent);font-weight:600;margin:8px 0;background:rgba(35,131,226,.1);padding:6px 10px;border-radius:4px}
-.nc-pi{position:relative;margin:2px 0}
-.nc-pd{position:absolute;top:2px;right:2px;width:20px;height:20px;background:#ff3b30;color:#fff;border:none;border-radius:50%;font-size:12px;line-height:20px;text-align:center;cursor:pointer;opacity:0;transition:opacity .15s;z-index:2;pointer-events:auto}
-.nc-pi:hover .nc-pd{opacity:1}
-.nc-ok{font-size:15px;color:#2d7d46;font-weight:600;text-align:center;margin:8px 0}
-.nc-err{font-size:13px;color:var(--c-err-text);background:var(--c-err-bg);border:1px solid var(--c-err-border);border-radius:8px;padding:12px;margin:8px 0;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.5}
-.nc-err-succ{font-size:13px;color:var(--c-err-succ-text);background:var(--c-err-succ-bg);border:1px solid var(--c-err-succ-border);border-radius:8px;padding:10px;margin:4px 0;line-height:1.5}
-.nc-tc{position:fixed;top:20px;right:20px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;pointer-events:none}
-.nc-t{padding:12px 20px;border-radius:6px;color:#fff;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,.15);pointer-events:auto;animation:nc-in .3s ease;display:flex;align-items:center;gap:8px;max-width:300px;word-break:break-word}
-.nc-ts{background:#2d7d46}.nc-te{background:#d32f2f}.nc-ti{background:#e65100}
-.nc-info{font-size:12px;color:var(--c-help);text-align:right;margin-top:-8px}
-.nc-progress{margin-top:8px;height:6px;background:var(--c-progress-bg);border-radius:3px;overflow:hidden;display:none}
-.nc-progress-bar{height:100%;background:var(--c-accent);border-radius:3px;transition:width .3s ease;width:0}
-.nc-shortcuts{font-size:12px;color:var(--c-help);margin-top:4px;line-height:1.6}
-.nc-shortcuts kbd{background:var(--c-kbd-bg);border:1px solid var(--c-kbd-border);border-radius:3px;padding:1px 5px;font-size:11px;font-family:monospace}
-.nc-dirty{font-size:12px;color:#e65100;margin-top:4px;display:none}
-.nc-h3r{display:flex;align-items:center;gap:6px}
-.nc-tb{padding:3px 10px;font-size:12px;border:1px solid var(--c-btn-ghost-border);background:var(--c-btn-ghost-bg);color:var(--c-btn-ghost-text);border-radius:4px;cursor:pointer;font-weight:600;transition:filter .15s}
-.nc-tb:hover{filter:brightness(.95)}
-.nc-tb:disabled{opacity:.6;cursor:wait}
-@keyframes nc-in{from{opacity:0;transform:translateX(50px)}to{opacity:1;transform:translateX(0)}}
-@media (prefers-color-scheme: dark) {
- :host{--c-bg:#1e1e1e;--c-text:#e0e0e0;--c-text-sec:#bbb;--c-border:#444;--c-input-bg:#2a2a2a;--c-bg-sec:#333;--c-pv-bg:#2a2a2a;--c-pv-text:#ddd;--c-pv-border:#444;--c-code-bg:#333;--c-th-bg:#383838;--c-td-border:#555;--c-btn-sec-bg:#333;--c-btn-sec-text:#e0e0e0;--c-btn-ghost-bg:#1e1e1e;--c-btn-ghost-text:#5b9fe6;--c-btn-ghost-border:#5b9fe6;--c-kbd-bg:#333;--c-kbd-border:#555;--c-progress-bg:#444;--c-err-bg:#3a1a1a;--c-err-border:#5c2828;--c-err-text:#ff6b6b;--c-err-succ-bg:#1a3a1a;--c-err-succ-border:#2d5c2d;--c-err-succ-text:#6bdf6b;--c-accent:#5b9fe6;--c-accent-hover:#4a8ed5}
-}`;
+  style.textContent = PANEL_CSS;
   shadow.appendChild(style);
 
   // ---------- UI 模板 ----------
   const ui = document.createElement('div');
-  ui.innerHTML = `
-<button class="nc-btn" title="左键选取 / 右键设置 / Alt+Shift+N">✂️</button>
-<div class="nc-tip">🔍 悬停高亮元素，单击提取内容 (Esc取消)</div>
-<div class="nc-mask"></div><div class="nc-hl"></div>
-<div class="nc-ov" id="ov-set"><div class="nc-modal">
- <h2>⚙️ Notion / 飞书 / Obsidian 配置</h2>
- <label>🚫 禁用站点（逗号分隔，命中则本脚本不启用）</label><input type="text" id="in-blocklist" placeholder="example.com, *.example.org" autocomplete="off">
- <div class="nc-help">支持 example.com（含子域）与 *.example.com（仅子域）。保存后刷新页面生效。</div>
- <label>🚦 发送节奏</label><select id="in-send-profile"><option value="gentle">温和 · 降低并发（推荐，规避平台接口限流）</option><option value="standard">标准 · 更快</option></select>
- <div class="nc-help">温和档：三平台错峰启动 700ms · 图片下载并发 2 · API 写入间隔 550ms；标准档：300ms / 3 / 350ms。</div>
- <h3><span>📕 Notion</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-notion"> 启用</label><button class="nc-tb" id="btn-test-notion" title="验证 Token 与数据库连通性（读取当前表单值，无需先保存）">🔌 测试</button></span></h3>
- <label>Integration Token</label><div class="nc-tw"><input type="password" id="in-tok" placeholder="secret_... 或 ntn_..." autocomplete="new-password"><button class="nc-tv nc-tv-notion" title="显示/隐藏">👁️</button></div>
- <label>Database ID</label><input type="text" id="in-db" placeholder="32 位 ID 或数据库链接" autocomplete="off">
- <div class="nc-help">⚠️ 必须在 Notion 数据库 Connections 中添加 Integration。</div>
- <label>标签属性名 (可选)</label><input type="text" id="in-tag" placeholder="Tags" autocomplete="off">
- <h3 style="margin-top:15px;"><span>🪁 飞书</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-feishu"> 启用</label><button class="nc-tb" id="btn-test-feishu" title="验证凭证 + 创建/回收测试文档（读取当前表单值）">🔌 测试</button></span></h3>
- <label>App ID</label><input type="text" id="in-fs-appid" placeholder="App ID" autocomplete="off">
- <label>App Secret</label><div class="nc-tw"><input type="password" id="in-fs-secret" placeholder="App Secret" autocomplete="new-password"><button class="nc-tv nc-tv-fs" title="显示/隐藏">👁️</button></div>
- <label>文件夹 Token</label><input type="text" id="in-fs-folder" placeholder="Folder Token" autocomplete="off">
- <div class="nc-help">⚠️ Token 明文存储于本地，请勿在公共电脑保存。</div>
- <h3 style="margin-top:15px;"><span>💎 Obsidian</span><span class="nc-h3r"><label class="nc-switch"><input type="checkbox" id="ck-obsidian"> 启用</label><button class="nc-tb" id="btn-test-obsidian" title="探测 Local REST API 连通性与 API Key（读取当前表单值）">🔌 测试</button></span></h3>
- <label>API Base URL</label><input type="text" id="in-obs-api-url" placeholder="http://127.0.0.1:27123" autocomplete="off">
- <label>API Key</label><div class="nc-tw"><input type="password" id="in-obs-api-key" placeholder="Local REST API 插件中获取" autocomplete="new-password"><button class="nc-tv nc-tv-obs" title="显示/隐藏">👁️</button></div>
- <label>保存路径</label><input type="text" id="in-obs-folder" placeholder="例如: Clippings" autocomplete="off">
- <div class="nc-help">💡 需安装 <b>Local REST API</b> 插件并启用 HTTP 端口(27123)。<br>💡 写入采用串行队列 + 自动重试；失败后可在弹窗中一键复制 Markdown 或重试。</div>
- <h3 style="margin-top:15px;"><span>🏷️ 域名默认标签</span></h3>
- <textarea id="in-domain-tags" rows="3" placeholder="每行一条：域名=标签1,标签2&#10;zhihu.com=阅读,知乎&#10;github.com=代码"></textarea>
- <div class="nc-help">发送前按当前站点域名（含子域）自动预填标签；手动输入优先于自动预填。</div>
- <div class="nc-shortcuts"><strong>快捷键</strong><br>🖱️ 左键拖拽 · 右键设置 · Alt+Shift+N 选取<br>⌨️ Esc 取消 · ↑/↓ 调整选取范围 · Ctrl+Enter 发送 · Ctrl+A 全选</div>
- <div class="nc-dirty" id="dirty-flag">⚠️ 有未保存的更改</div>
- <div class="nc-row"><button class="nc-b nc-b2" id="btn-sc">关闭</button><button class="nc-b nc-b1" id="btn-ss">保存设置</button></div>
-</div></div>
-<div class="nc-ov nc-ov-tr" id="ov-cfm"><div class="nc-modal" id="modal-cfm">
- <h2 class="nc-modal-h2"><span>✂️ 确认发送</span><button class="nc-min" id="btn-min" title="最小化">🔽</button></h2>
- <label>页面标题</label><input type="text" id="in-title" autocomplete="off">
- <label>内容预览</label><div class="nc-pv" id="pv" tabindex="0"></div><div class="nc-info" id="pv-count"></div>
- <div class="nc-progress" id="pg"><div class="nc-progress-bar" id="pg-bar"></div></div><div class="nc-info" id="pg-text" style="display:none"></div>
- <label>标签 (逗号分隔)</label><input type="text" id="in-tags" placeholder="阅读, 技术" autocomplete="off">
- <div class="nc-row"><button class="nc-b nc-bk" id="btn-back">↩ 重选</button><button class="nc-b nc-b2" id="btn-add" title="返回页面继续选取，追加到当前内容末尾">➕ 追加</button><button class="nc-b nc-b2" id="btn-copy">📋 复制</button><span style="flex:1"></span><button class="nc-b nc-b2" id="btn-cc">取消</button><button class="nc-b nc-b1" id="btn-cs">发送</button></div>
-</div></div>
-<div class="nc-ov nc-ov-tr" id="ov-ok"><div class="nc-modal" style="text-align:center;gap:16px">
- <h2>✅ 发送完成！</h2><p class="nc-ok" id="ok-msg"></p>
- <div class="nc-row" style="justify-content:center;flex-wrap:wrap"><button class="nc-b nc-b1" id="btn-oo-notion" style="display:none">打开 Notion</button><button class="nc-b nc-bk" id="btn-oo-feishu" style="display:none;background:#fff;color:#3370ff;border:1.5px solid #3370ff">打开飞书</button><button class="nc-b nc-bk" id="btn-oo-obsidian" style="display:none;background:#fff;color:#7c3aed;border:1.5px solid #7c3aed">打开 Obsidian</button><button class="nc-b nc-b2" id="btn-oc">关闭</button></div>
-</div></div>
-<div class="nc-ov nc-ov-tr" id="ov-err"><div class="nc-modal" style="text-align:center;gap:12px">
- <h2 id="err-title" style="color:#d32f2f">❌ 发送失败</h2><div class="nc-err-succ" id="err-succ" style="display:none"></div><div class="nc-err" id="err-detail"></div>
- <div class="nc-row" style="justify-content:center;flex-wrap:wrap"><button class="nc-b nc-br" id="btn-retry">🔄 重试</button><button class="nc-b nc-b2" id="btn-err-md" style="display:none">📋 复制 Markdown</button><button class="nc-b nc-b2" id="btn-err-copy">📋 复制错误</button><button class="nc-b nc-b2" id="btn-err-close">关闭</button></div>
-</div></div>
-<div class="nc-tc" id="tc"></div>`;
+  ui.innerHTML = PANEL_HTML;
   shadow.appendChild(ui);
 
   // ---------- 元素引用 ----------
@@ -493,60 +870,98 @@
    errSucc: $('#err-succ'), modalCfm: $('#modal-cfm'), btnMin: $('#btn-min'), ckNotion: $('#ck-notion'),
    ckFeishu: $('#ck-feishu'), tok: $('#in-tok'), db: $('#in-db'), tag: $('#in-tag'), tags: $('#in-tags'),
    fsAppId: $('#in-fs-appid'), fsSecret: $('#in-fs-secret'), fsFolder: $('#in-fs-folder'), title: $('#in-title'),
-   okMsg: $('#ok-msg'), send: $('#btn-cs'), btnCopy: $('#btn-copy'), back: $('#btn-back'), btnAdd: $('#btn-add'),
+   okMsg: $('#ok-msg'), send: $('#btn-cs'), btnCopy: $('#btn-copy'), btnCopyMd: $('#btn-cmd'), back: $('#btn-back'), btnAdd: $('#btn-add'),
    okOpenNotion: $('#btn-oo-notion'), okOpenFeishu: $('#btn-oo-feishu'), okOpenObsidian: $('#btn-oo-obsidian'), okClose: $('#btn-oc'),
-   tokTglNotion: $('.nc-tv-notion'), tokTglFeishu: $('.nc-tv-fs'), tokTglObs: $('.nc-tv-obs'), toast: $('#tc'), retry: $('#btn-retry'),
+   tokTglNotion: $('.nc-tv-notion'), tokTglFeishu: $('.nc-tv-fs'), tokTglObsidian: $('.nc-tv-obs'), toast: $('#tc'), retry: $('#btn-retry'),
    errCopy: $('#btn-err-copy'), errClose: $('#btn-err-close'), pg: $('#pg'), pgBar: $('#pg-bar'),
    pgText: $('#pg-text'), dirtyFlag: $('#dirty-flag'),
    ckObsidian: $('#ck-obsidian'), obsApiUrl: $('#in-obs-api-url'),
    obsApiKey: $('#in-obs-api-key'), obsFolder: $('#in-obs-folder'),
-   testNotion: $('#btn-test-notion'), testFeishu: $('#btn-test-feishu'), testObs: $('#btn-test-obsidian'),
+   testNotion: $('#btn-test-notion'), testFeishu: $('#btn-test-feishu'), testObsidian: $('#btn-test-obsidian'),
    errMd: $('#btn-err-md'),
    blocklist: $('#in-blocklist'), domainTags: $('#in-domain-tags'), sendProfile: $('#in-send-profile'),
+   expBtn: $('#btn-exp'), impBtn: $('#btn-imp'), impFile: $('#in-imp-file'),
+   testAll: $('#btn-testall'),
+   histList: $('#hist-list'), histClear: $('#btn-hist-clear'),
   };
 
-  // ---------- 运行时状态 ----------
-  let selecting = false, confirmOpen = false, blocks = [], hlTarget = null;
-  let dragging = false, dragSX = 0, dragSY = 0, dragIL = 0, dragIT = 0, dragDist = 0;
-  let hidden = false, hiddenEdge = '', hiddenForImg = false, cachedIcon = null, rafId = null, imgCheckTs = 0;
-  let hoverTimer = null, okAutoCloseTimer = null, lastNotionPageId = null, lastFeishuDocId = null;
-  let cachedSend = null, fsTokenCache = { token: '', expiry: 0 }, fsLastWrite = 0, imgDL = new Map(), imgDLBytes = 0;
-  const imgFailTs = new Map(); // v5.7.1：坏图负缓存（url → 失败时间戳），避免追加选取场景对同一坏图反复走超时×重试
-  let settingsDirty = false, settingsListenersAttached = false;
-  // v5.5.0：modeAc 为「选取/确认弹窗」模式级信号——每次进入模式重建、退出即 abort，
-  // 根治此前 startSelect/showConfirm 每次重复挂载 keydown/scroll 监听且从不移除的泄漏
-  let modeAc = null, appendMode = false;
-  // v5.6.0：选取粒度调节——selCands 为「当前目标 + 合格块级祖先」候选链，↑ 扩大 / ↓ 缩小
+  // ---------- 运行时状态（按职责分组） ----------
+  let selecting = false, blocks = [], hlTarget = null;
   let selCands = [], selIdx = 0, selAnchor = null;
-  let accSuccess = []; // v5.5.0：跨重试累计的成功平台（重试仅补发失败项，成功信息需保留）
-  let sending = false; // v5.5.0：发送中标记（配合 beforeunload 防误关页面）
-  let notionDbCache = { dbId: '', props: null }; // v5.2.0：数据库 schema 会话级缓存，省去每次发送一次 GET
+  let appendMode = false;
+  let hoverTimer = null, rafId = null;
+  let dragging = false, dragSX = 0, dragSY = 0, dragIL = 0, dragIT = 0, dragDist = 0;
+  let hidden = false, hiddenEdge = '', hiddenForImg = false, imgCheckTs = 0;
+  let cachedIcon = null;
+  let confirmOpen = false;
+  let sending = false;
+  let accSuccess = [];
+  let cachedSend = null, lastNotionPageId = null, lastFeishuDocId = null, okAutoCloseTimer = null;
+  let notionDbCache = { dbId: '', props: null };
+  let fsTokenCache = { token: '', expiry: 0 }, fsLastWrite = 0, imgDL = new Map(), imgDLBytes = 0;
+  const imgFailTs = new Map();
+  let settingsDirty = false, settingsListenersAttached = false;
+  let modeAc = null;
+  // 清理钩子：重注入时旧实例的 __ncCleanup 会 abort 旧 modeAc，连带移除旧 signal 上的监听器；
+  // body 十字线光标位于 shadow 之外，host 移除不会覆盖它，须随清理一并复位
+  _cleanupFns.push(() => {
+   try { modeAc && modeAc.abort(); } catch (e) {   }
+   if (selecting) { try { document.body.style.cursor = ''; } catch (e) {   } }
+  });
 
   const isOwn = (node) => { let n = node; while (n) { if (n === host) return true; n = n.parentNode || n.host; } return false; };
 
+  // 段落块是否含非空文本——parseBlocks 过滤与知乎评论 body 判定共用同一谓词
+  const paraHasText = (b) => (b?.paragraph?.rich_text || []).some(t => (t.text?.content || '').trim());
+
   // ---------- Toast / 剪贴板 ----------
   function toast(msg, type = 'success', ms) {
-   while (el.toast.children.length >= C.TOAST_MAX) el.toast.firstChild.remove();
+   while (el.toast.children.length >= C.TOAST_MAX) { const old = el.toast.firstChild; clearTimeout(old._ncTimer); old.remove(); }
    const t = document.createElement('div');
    t.className = `nc-t ${type === 'error' ? 'nc-te' : type === 'info' ? 'nc-ti' : 'nc-ts'}`;
    t.textContent = msg;
    el.toast.appendChild(t);
-   // v5.3.0：错误类提示延长停留（6s），给长错误信息留阅读时间
-   setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, ms || (type === 'error' ? 6000 : C.TOAST_MS));
+   t._ncTimer = setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, ms || (type === 'error' ? 6000 : C.TOAST_MS));
   }
   function copyText(text, successMsg = '已复制') {
    if (!text) { toast('没有可复制的内容', 'error'); return; }
-   try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(text); toast(successMsg); return; } } catch { /* GM_API 不可用 */ }
+   try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(text); toast(successMsg); return; } } catch {   }
    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(() => toast(successMsg), () => toast('复制失败', 'error'));
    else toast('当前环境不支持剪贴板操作', 'error');
   }
+  function openTab(url) {
+   let win = null;
+   try { win = window.open(url, '_blank'); } catch {   }
+   if (win) { try { win.opener = null; } catch {   } return; }
+   copyText(url, '📋 链接已复制（弹窗被阻止）');
+  }
 
-  // ---------- 平台启用/配置判定（v5.2.0：统一读快照 S） ----------
+  // ---------- 弹窗焦点管理 ----------
+  // 打开时聚焦首控件、Tab 在模态内循环、关闭还原焦点；仅覆盖键盘路径，不改变任何业务回调
+  let lastFocusedBeforeModal = null;
+  const rememberFocus = () => { lastFocusedBeforeModal = shadow.activeElement || document.activeElement; };
+  const restoreFocus = () => { const n = lastFocusedBeforeModal; lastFocusedBeforeModal = null; if (n && n.isConnected && typeof n.focus === 'function') { try { n.focus(); } catch {   } } };
+  const modalFocusables = (ov) => [...ov.querySelectorAll('button,input,select,textarea,a[href]')].filter(n => !n.disabled && n.getClientRects().length > 0);
+  function trapModalTab(e, ov) {
+   const list = modalFocusables(ov);
+   if (!list.length) return;
+   const first = list[0], last = list[list.length - 1];
+   const active = shadow.activeElement;
+   const inside = active && ov.contains(active);
+   if (e.shiftKey) { if (!inside || active === first) { e.preventDefault(); last.focus(); } }
+   else if (!inside || active === last) { e.preventDefault(); first.focus(); }
+  }
+  function onModalTab(e) {
+   if (e.key !== 'Tab') return;
+   for (const ov of [el.ovCfm, el.ovErr, el.ovOk, el.ovSet]) {
+    if (ov.style.display === 'flex') { trapModalTab(e, ov); return; }
+   }
+  }
+  document.addEventListener('keydown', onModalTab, { signal, capture: true });
+
+  // ---------- 平台启用/配置判定 ----------
   const isNotionConfigured = () => !!(S.notionToken && S.notionDbId);
   const isFeishuConfigured = () => !!(S.fsAppId && S.fsAppSecret);
-  // v5.7.0 修复：此前恒为 true → 未配置 API Key 的用户每次发送都会附带一次注定失败的
-  // Obsidian 上传（Local REST API 必须鉴权）。现以「已填 API Key」作为配置完成判据；
-  // 手动勾选「启用」仍可覆盖默认判定，行为与 Notion/飞书 的 enabled-默认逻辑对齐。
   const isObsidianConfigured = () => !!String(S.obsApiKey || '').trim();
   const getPlatformEnabled = (v, configured) => (v === null || v === undefined) ? configured : !!v;
   const isNotionEnabled = () => getPlatformEnabled(S.enableNotion, isNotionConfigured());
@@ -554,149 +969,19 @@
   const isObsidianEnabled = () => getPlatformEnabled(S.enableObsidian, isObsidianConfigured());
 
   // ---------- 进度条 ----------
-  const showProgress = () => { el.pg.style.display = ''; el.pgBar.style.width = '0'; el.pgText.style.display = 'none'; };
-  const updateProgress = (pct, text) => { el.pgBar.style.width = Math.min(Math.max(pct | 0, 0), 100) + '%'; if (text) { el.pgText.style.display = ''; el.pgText.textContent = text; } };
-  const hideProgress = () => { el.pg.style.display = 'none'; el.pgBar.style.width = '0'; el.pgText.style.display = 'none'; };
-
-  // ============================================================
-  // Notion 块构造
-  // ============================================================
-  function toRich(text) {
-   const s = String(text ?? '');
-   if (!s) return [];
-   const items = [];
-   for (let i = 0; i < s.length && items.length < C.RT_ITEMS_MAX; i += C.TEXT_SAFE)
-    items.push({ type: 'text', text: { content: s.slice(i, i + C.TEXT_SAFE) } });
-   if (items.length === C.RT_ITEMS_MAX && s.length > C.RT_ITEMS_MAX * C.TEXT_SAFE) {
-    const last = items[items.length - 1].text.content;
-    items[items.length - 1].text.content = last.slice(0, -3) + '...';
-   }
-   return items;
-  }
-  /**
-   * v5.2.0 修复：超长富文本不再截断（此前 >1990 字符直接截断丢内容），
-   * 改为分片——首片携带链接/样式，后续片为纯文本，与 toRich 语义对齐。
-   */
-  function capRT(rt) {
-   const out = [];
-   for (const item of rt || []) {
-    if (out.length >= C.RT_ITEMS_MAX) break;
-    const content = String(item.text?.content ?? '');
-    if (!content) continue;
-    const link = item.text?.link?.url ? safeURL(item.text.link.url) : null;
-    const annots = item.annotations || null;
-    if (content.length <= C.TEXT_SAFE) {
-     const node = { type: 'text', text: { content } };
-     if (link) node.text.link = { url: link };
-     if (annots) node.annotations = annots;
-     out.push(node);
-     continue;
-    }
-    const first = { type: 'text', text: { content: content.slice(0, C.TEXT_SAFE) } };
-    if (link) first.text.link = { url: link };
-    if (annots) first.annotations = annots;
-    out.push(first);
-    for (let i = C.TEXT_SAFE; i < content.length && out.length < C.RT_ITEMS_MAX; i += C.TEXT_SAFE)
-     out.push({ type: 'text', text: { content: content.slice(i, i + C.TEXT_SAFE) } });
-   }
-   return out;
-  }
-  const mkBlockRT = (type, rt, extra) => ({ object: 'block', type, [type]: { rich_text: (rt && rt.length) ? rt : [{ type: 'text', text: { content: '' } }], ...(extra || {}) } });
-  const mkBlock = (type, text, extra) => mkBlockRT(type, toRich(text), extra);
-  const mkPara = (t) => mkBlock('paragraph', t);
-  const mkH = (lv, t) => mkBlock(`heading_${Math.min(Math.max(lv | 0, 1), 3)}`, t);
-  const mkQuote = (t) => mkBlock('quote', t);
-  const mkDivider = () => ({ object: 'block', type: 'divider', divider: {} });
-  const mkCode = (text, lang) => {
-   const l = lang ? String(lang).toLowerCase().trim() : '';
-   return mkBlock('code', text, { language: NOTION_LANGS.has(l) ? l : (LANG_ALIAS[l] || 'plain text') });
+  // 进度条冗余写守卫——sendToAll 多平台并发回调逐次写 width/textContent，
+  // 值未变时跳过 DOM 写（签名短路，行为等价；show/hideProgress 复位签名保证状态切换必写）。
+  let lastPgW = '0%', lastPgT;
+  const resetProgress = (display) => { el.pg.style.display = display; el.pg.setAttribute('aria-valuenow', '0'); el.pgBar.style.width = '0'; lastPgW = '0%'; el.pgText.style.display = 'none'; lastPgT = undefined; };
+  const showProgress = () => resetProgress('');
+  const updateProgress = (pct, text) => {
+   const w = Math.min(Math.max(pct | 0, 0), 100) + '%';
+   if (w !== lastPgW) { el.pgBar.style.width = w; el.pg.setAttribute('aria-valuenow', String(Math.min(Math.max(pct | 0, 0), 100))); lastPgW = w; }
+   if (text && text !== lastPgT) { el.pgText.style.display = ''; el.pgText.textContent = text; lastPgT = text; }
   };
-  const mkRichPara = (richArr) => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: capRT(richArr) } });
-  /**
-   * v5.2.0：data: 内嵌图片不再在提取期降级为占位段落（原设计“发送时分平台路由”
-   * 从未生效）。现在保留为图片块，由发送阶段分流：飞书实际上传、Notion 递归略过、
-   * Obsidian 跳过，预览面板可直接显示。
-   */
-  function mkMedia(type, rawUrl) {
-   const raw = String(rawUrl || '');
-   if (type === 'image' && DATA_IMG_RE.test(raw)) return { object: 'block', type: 'image', image: { type: 'external', external: { url: raw } } };
-   const url = safeURL(raw);
-   if (!url) return null;
-   if (type === 'image') return { object: 'block', type: 'image', image: { type: 'external', external: { url } } };
-   if (type === 'video') return { object: 'block', type: 'video', video: { type: 'external', external: { url } } };
-   return { object: 'block', type: 'embed', embed: { url } };
-  }
-  /**
-   * v5.2.0：表格超宽不再静默丢列——超过 TABLE_MAX_COLS 的列合并进末列；
-   * 单元格改用 toRich 分片，超长内容不再截断。
-   */
-  function mkTable(rows, hasHeader) {
-   const valid = rows.filter(r => Array.isArray(r) && r.length > 0);
-   if (!valid.length) return [];
-   let w = 1;
-   for (const r of valid) w = Math.max(w, r.length);
-   w = Math.min(w, C.TABLE_MAX_COLS);
-   const norm = valid.map(row => {
-    const cells = [];
-    for (let i = 0; i < w; i++) {
-     let t = String(row[i] ?? '');
-     if (i === w - 1 && row.length > C.TABLE_MAX_COLS) {
-      const overflow = row.slice(C.TABLE_MAX_COLS).map(c => String(c ?? '').trim()).filter(Boolean);
-      if (overflow.length) t = [t.trim(), ...overflow].filter(Boolean).join(' / ');
-     }
-     cells.push(t ? toRich(t) : []);
-    }
-    return { type: 'table_row', table_row: { cells } };
-   });
-   const out = [];
-   for (let i = 0; i < norm.length; i += C.TABLE_MAX_ROWS)
-    out.push({ object: 'block', type: 'table', table: { table_width: w, has_column_header: hasHeader && i === 0, children: norm.slice(i, i + C.TABLE_MAX_ROWS) } });
-   return out;
-  }
-  const rtStr = (rt) => (rt || []).map(t => t?.text?.content || '').join('');
-  const cellText = (cell) => Array.isArray(cell) ? cell.map(t => t.text?.content || '').join('') : '';
-  function tableToParas(tbl) {
-   const out = [];
-   for (const row of tbl.table?.children || []) {
-    const line = (row.table_row?.cells || []).map(cellText).join(' | ');
-    if (line.trim()) out.push(mkPara(line));
-   }
-   return out;
-  }
-  function stripDeep(blocks) {
-   const out = [];
-   for (const b of blocks) {
-    if (!b) continue;
-    if (b.type === 'table') { out.push(...tableToParas(b)); continue; }
-    const body = b[b.type];
-    if (body && Array.isArray(body.children)) { const kids = body.children; delete body.children; out.push(b); out.push(...stripDeep(kids)); }
-    else out.push(b);
-   }
-   return out;
-  }
-  function flattenToggle(children, depth = 0) {
-   if (depth > C.WALK_DEPTH_MAX) return [];
-   const out = [];
-   for (const b of children) {
-    if (!b) continue;
-    if (b.type === 'toggle') {
-     out.push(mkPara('▸ ' + rtStr(b.toggle?.rich_text)));
-     out.push(...flattenToggle(b.toggle?.children || [], depth + 1));
-    } else if (b.type === 'table') out.push(...tableToParas(b));
-    else out.push(...stripDeep([b]));
-   }
-   return out;
-  }
-  const mkToggle = (summary, children) => {
-   const flat = flattenToggle(children).slice(0, C.BATCH_SIZE);
-   const toggle = { rich_text: toRich(summary) };
-   if (flat.length) toggle.children = flat;
-   return { object: 'block', type: 'toggle', toggle };
-  };
+  const hideProgress = () => resetProgress('none');
 
-  // ============================================================
-  // 页面内容提取
-  // ============================================================
+  // ===== 媒体资源探测 =====
   function realImgSrc(img) {
    if (!img) return null;
    const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset');
@@ -719,38 +1004,42 @@
    }
    return null;
   }
+  const hasClassInAncestry = (node, re, depth = 3) => {
+   let p = node?.parentElement;
+   for (let i = 0; i < depth && p; i++, p = p.parentElement) {
+    const pc = typeof p.className === 'string' ? p.className : '';
+    if (re.test(pc)) return true;
+   }
+   return false;
+  };
+  // 廉价判定（className / src 正则、祖先 class）前置，昂贵的 getBoundingClientRect() 延后。
+  // 该函数在 removeAvatarImgs / walk 中按图片循环调用，原先每张图片必触发一次尺寸读取——
+  // 页面布局脏时即为强制同步回流（布局抖动），批量图片下开销显著。各命中条件为「或」语义，重排不改变结果。
   function isAvatar(img) {
    if (!img) return true;
    const src = img.src || img.getAttribute('data-src') || '';
    if (/\.(gif|webp)($|\?|&)/i.test(src)) return false;
-   const r = img.getBoundingClientRect();
-   if (r.width > 0 && r.height > 0 && (r.width <= 80 || r.height <= 80)) return true;
-   const cls = typeof img.className === 'string' ? img.className.toLowerCase() : '';
-   if (/avatar|icon|emoji|face/.test(cls)) return true;
-   let p = img.parentElement;
-   for (let i = 0; i < 3 && p; i++, p = p.parentElement) {
-    const pc = typeof p.className === 'string' ? p.className.toLowerCase() : '';
-    if (/avatar|icon|emoji|face/.test(pc)) return true;
-   }
+   const cls = typeof img.className === 'string' ? img.className : '';
+   if (/avatar|icon|emoji|face/i.test(cls)) return true;
    if (/avatar|emoji|icon/i.test(src)) return true;
    if (/_(is|xs|s)\.(jpg|jpeg|png|webp)/i.test(src)) return true;
+   if (hasClassInAncestry(img, /avatar|icon|emoji|face/i)) return true;
+   const r = img.getBoundingClientRect();
+   if (r.width > 0 && r.height > 0 && (r.width <= 80 || r.height <= 80)) return true;
    return false;
   }
   function isZhihuMember(img) {
    if (!isZhihu) return false;
-   const combined = [typeof img.className === 'string' ? img.className : '', img.src || '', img.getAttribute('data-src') || '', img.alt || '', img.title || ''].join(' ').toLowerCase();
-   if (/member|vip|盐选|pay|lock/.test(combined)) return true;
-   let p = img.parentElement;
-   for (let i = 0; i < 3 && p; i++, p = p.parentElement) {
-    if (/member|vip|pay|lock|盐选/.test((typeof p.className === 'string' ? p.className : '').toLowerCase())) return true;
-   }
+   const combined = [typeof img.className === 'string' ? img.className : '', img.src || '', img.getAttribute('data-src') || '', img.alt || '', img.title || ''].join(' ');
+   if (/member|vip|盐选|pay|lock/i.test(combined)) return true;
+   if (hasClassInAncestry(img, /member|vip|pay|lock|盐选/i)) return true;
    return false;
   }
   function videoSrc(v) {
    if (!v) return null;
-   const d = normURL(v.src) || safeURL(v.src);
+   const d = normOrSafe(v.src);
    if (d) return d;
-   for (const s of v.querySelectorAll('source')) { const u = normURL(s.src) || safeURL(s.src); if (u) return u; }
+   for (const s of v.querySelectorAll('source')) { const u = normOrSafe(s.src); if (u) return u; }
    return null;
   }
   function gifMedia(container) {
@@ -798,51 +1087,34 @@
    return l;
   }
 
-  // ============================================================
-  // 块解析
-  // ============================================================
+  // ===== 页面内容解析为块 =====
   function parseBlocks(fragment, depth = 0) {
-   if (depth > C.WALK_DEPTH_MAX) return []; // v5.7.0：DETAILS 嵌套递归的深度护栏（此前绕过 WALK_DEPTH_MAX，病态嵌套可致栈溢出）
+   if (depth > C.WALK_DEPTH_MAX) return [];
    let result = [], frags = [];
-   function innerText(node) { // v5.7.1：原 fastText + 别名 const innerText = fastText 合并为单一函数名，消除一跳间接
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent;
-    if (node.nodeType !== Node.ELEMENT_NODE) return '';
-    const tag = node.tagName;
-    if (tag === 'IMG' || tag === 'VIDEO' || tag === 'IFRAME') return '';
-    if (tag === 'BR') return '\n';
-    if (INLINE_TAGS.has(tag) || tag === 'A') {
-     const parts = [];
-     for (const c of node.childNodes) parts.push(innerText(c));
-     return parts.join('');
-    }
-    const parts = [];
-    for (const c of node.childNodes) parts.push(innerText(c));
-    let s = parts.join('');
-    if (BLOCK_TAGS.has(tag) && tag !== 'TABLE') s += '\n';
-    return s;
+   const preHosts = new Set();
+   for (const pre of fragment.querySelectorAll('pre')) {
+    let p = pre.parentElement;
+    while (p && p !== fragment && p.nodeType === Node.ELEMENT_NODE) { preHosts.add(p); p = p.parentElement; }
    }
-   function mergeAnnot(tag, parent) {
-    const a = parent ? { ...parent } : {};
-    if (tag === 'B' || tag === 'STRONG') a.bold = true;
-    if (tag === 'I' || tag === 'EM') a.italic = true;
-    if (tag === 'U' || tag === 'INS') a.underline = true;
-    if (tag === 'S' || tag === 'DEL' || tag === 'STRIKE') a.strikethrough = true;
-    if (tag === 'CODE') a.code = true;
-    return Object.keys(a).length ? a : null;
-   }
+   // 相邻同 link + annotations 的片段合并为一个 rich_text item——逐 frag 建项，
+   // 高格式段落（大量行内代码/加粗）易触 RT_ITEMS_MAX=100 被 capRT 截断丢内容；合并后渲染结果不变。
    function fragsToRT(list) {
     const rt = [];
     const bufArr = [];
-    const flushBuf = () => { if (bufArr.length) { rt.push({ type: 'text', text: { content: bufArr.join('') } }); bufArr.length = 0; } };
+    let lastKey = null, lastNode = null;
+    const flushBuf = () => { if (bufArr.length) { rt.push({ type: 'text', text: { content: bufArr.join('') } }); bufArr.length = 0; lastKey = null; lastNode = null; } };
     for (const f of list) {
      if (!f || !f.text) continue;
      if (!f.link && !f.annot) { bufArr.push(f.text); continue; }
      flushBuf();
+     const key = (f.link || '') + '|' + (f.annot ? JSON.stringify(f.annot) : '');
+     if (lastNode && key === lastKey) { lastNode.text.content += f.text; continue; }
      const node = { type: 'text', text: { content: f.text } };
      const u = safeURL(f.link);
      if (u) node.text.link = { url: u };
      if (f.annot) node.annotations = f.annot;
      rt.push(node);
+     lastKey = key; lastNode = node;
     }
     flushBuf();
     return capRT(rt);
@@ -853,9 +1125,9 @@
     return nonEmpty.length ? fragsToRT(nonEmpty) : [];
    }
    const hasText = (rt) => rt.some(t => (t.text?.content || '').trim());
+   const appendRTText = (rt, t) => rt.concat([{ type: 'text', text: { content: (hasText(rt) ? '\n' : '') + t } }]);
    const flush = () => { const rt = takeRich(); if (rt.length && hasText(rt)) result.push(mkBlockRT('paragraph', rt)); };
    function listItemBlock(li, ordered, allowKids, hoist, depth = 0) {
-    // v5.7.0：列表结构嵌套过深（li→ul→li… 无限递归链）时降级为纯文本项，防栈溢出
     if (depth > C.WALK_DEPTH_MAX) { const t = innerText(li).replace(/\s+/g, ' ').trim(); return t ? mkBlockRT(ordered ? 'numbered_list_item' : 'bulleted_list_item', toRich(t)) : null; }
     const savedRes = result, savedFrags = frags;
     result = []; frags = [];
@@ -874,18 +1146,18 @@
     if (rest.length && rest[0].type === 'paragraph') { rt = rest[0].paragraph.rich_text; rest.shift(); }
     for (const b of rest) {
      if (allowKids) kids.push(b);
-     else if (b.type === 'paragraph') { const t = rtStr(b.paragraph.rich_text).trim(); if (t) rt = rt.concat([{ type: 'text', text: { content: (hasText(rt) ? '\n' : '') + t } }]); }
+     else if (b.type === 'paragraph') { const t = rtStr(b.paragraph.rich_text).trim(); if (t) rt = appendRTText(rt, t); }
      else hoist.push(b);
     }
     for (const nl of nestedLists) {
      if (allowKids) {
       for (const sub of nl.children) {
        if (sub.tagName !== 'LI') continue;
-       kids.push(listItemBlock(sub, nl.tagName === 'OL', false, kids, depth + 1)); // v5.7.0：结构递归传递深度
+       kids.push(listItemBlock(sub, nl.tagName === 'OL', false, kids, depth + 1));
       }
      } else {
       const t = innerText(nl).trim();
-      if (t) rt = rt.concat([{ type: 'text', text: { content: (hasText(rt) ? '\n' : '') + t } }]);
+      if (t) rt = appendRTText(rt, t);
      }
     }
     const blk = mkBlockRT(type, rt.length ? capRT(rt) : null);
@@ -928,9 +1200,7 @@
      const children = [];
      for (const c of node.childNodes) {
       if (c === sum) continue;
-      const frag = document.createDocumentFragment();
-      frag.appendChild(c.cloneNode(true));
-      children.push(...parseBlocks(frag, depth + 1)); // v5.7.0：向嵌套 DETAILS 传递深度
+      children.push(...blocksFromClone(c.cloneNode(true), depth + 1));
      }
      result.push(mkToggle(sumText, children));
      return;
@@ -951,8 +1221,8 @@
      if (!isAvatar(node) && !isZhihuMember(node)) { flush(); const b = mkMedia('image', realImgSrc(node)); if (b) result.push(b); }
      return;
     }
-    if (tag === 'VIDEO') { flush(); const b = mkMedia('video', videoSrc(node)); if (b) result.push(b); return; }
-    if (tag === 'IFRAME') { flush(); const b = mkMedia('embed', normURL(node.src) || safeURL(node.src)); if (b) result.push(b); return; }
+    if (tag === 'VIDEO') { flush(); result.push(...mediaBlocks('video', videoSrc(node))); return; }
+    if (tag === 'IFRAME') { flush(); result.push(...mediaBlocks('embed', normOrSafe(node.src))); return; }
     const hm = HEADING_RE.exec(tag);
     if (hm) {
      flush();
@@ -967,7 +1237,7 @@
     if (tag === 'LI') {
      flush();
      const hoist = [];
-     const item = listItemBlock(node, node.parentElement?.tagName === 'OL', true, hoist, depth); // v5.7.0：传入当前深度
+     const item = listItemBlock(node, node.parentElement?.tagName === 'OL', true, hoist, depth);
      result.push(item);
      for (const h of hoist) result.push(h);
      return;
@@ -981,7 +1251,7 @@
      return;
     }
     if (tag === 'PRE') { flush(); result.push(mkCode(node.textContent || '', detectLang(node))); return; }
-    if (tag === 'DIV' && node.querySelector('pre') && !node.querySelector('p,h1,h2,h3,h4,h5,h6,blockquote,ul,ol,details,article,section')) {
+    if (tag === 'DIV' && preHosts.has(node) && !node.querySelector('p,h1,h2,h3,h4,h5,h6,blockquote,ul,ol,details,article,section')) {
      flush();
      const pre = node.querySelector('pre');
      result.push(mkCode(pre.textContent || '', detectLang(pre)));
@@ -996,7 +1266,7 @@
    return result
     .filter(b => {
      if (!b) return false;
-     if (b.type === 'paragraph') return (b.paragraph?.rich_text || []).some(t => (t.text?.content || '').trim());
+     if (b.type === 'paragraph') return paraHasText(b);
      return true;
     })
     .map(b => {
@@ -1006,9 +1276,7 @@
     });
   }
 
-  // ============================================================
-  // 知乎
-  // ============================================================
+  // ===== 知乎页面适配 =====
   const removeAvatarImgs = (root) => root.querySelectorAll('img').forEach(img => { if (isAvatar(img) || isZhihuMember(img)) img.remove(); });
   function cleanZhihu(clone) { clone.querySelectorAll(ZHIHU_REMOVE).forEach(n => n.remove()); removeAvatarImgs(clone); return clone; }
   function zhihuAuthor(root) {
@@ -1021,15 +1289,12 @@
   function zhihuQuestionTitle(root) {
    const q = (s) => (s || '').trim().replace(/\s+/g, ' ');
    const ok = (t) => t && t.length >= 4 && t.length <= 200 && !/^(查看全部|展开|收起|广告|更多|写回答|关注|登录|注册|发私信)/.test(t) && !/^(\d+个?回答|\d+条?评论)/.test(t);
-   // v5.3.4 修复：问题详情页标题以页面顶部 .QuestionHeader-title（h1）为准，
-   // 不再从回答卡片内兜底 h2（此前会误取回答正文的二级标题作为“问题标题”）
    if (location.pathname.includes('/question/')) {
     for (const sel of ['.QuestionHeader-title', 'h1.QuestionHeader-title', '.QuestionHeader h1', '.QuestionHeader-content h1']) {
      const h = document.querySelector(sel);
      if (h) { const t = q(h.textContent); if (ok(t)) return t; }
     }
    }
-   // 列表/搜索页：从卡片容器内取标题（去掉宽泛 h2 兜底）
    const container = root.closest('.ContentItem') || root.closest('.Card') || root.closest('[itemprop="suggestedAnswer"]') || root;
    for (const sel of ['.ContentItem-title', '.QuestionItem-title', 'h2.ContentItem-title', 'h2 a[href*="/question/"]']) {
     const found = container.querySelector(sel);
@@ -1044,21 +1309,21 @@
    if (m) return `https://www.zhihu.com/question/${m[1]}`;
    return safeURL(location.href);
   }
-  const ZH_COMMENT_ITEM = '.CommentItemV2, .CommentItem';
-  const ZH_REPLY_ITEM = '.ReplyItem';
-  const ZH_COMMENT_BOX = '.CommentsV2, .CommentListV2, .Comments-container, [class*="CommentList"]';
-  const ZH_COMMENT_REMOVE = [
+  const ZHIHU_COMMENT_ITEM = '.CommentItemV2, .CommentItem';
+  const ZHIHU_REPLY_ITEM = '.ReplyItem';
+  const ZHIHU_COMMENT_BOX = '.CommentsV2, .CommentListV2, .Comments-container, [class*="CommentList"]';
+  const ZHIHU_COMMENT_REMOVE = [
    '[class*="VoteButton"]', 'button[aria-label*="赞"]', 'button[aria-label*="回复"]', '[class*="CommentItemV2-meta"]', '[class*="CommentItem-meta"]',
    '[class*="CommentItemV2-footer"]', '[class*="CommentItem-footer"]', '[class*="ReplyItem-footer"]', '[class*="MoreButton"]', '[class*="more-button"]',
    '[class*="toolbar"]', '[class*="Toolbar"]', '.CommentItemV2-avatar', '.CommentItem-avatar', '[class*="CommentAvatar"]', '[class*="comment-avatar"]',
    '[class*="authorInfo"]', '[class*="AuthorInfo"]',
   ].join(',');
-  function zhCommentAuthor(item) {
+  function zhihuCommentAuthor(item) {
    const a = item.querySelector('a[href*="/people/"]');
    if (!a) return { name: '', url: null };
    return { name: a.textContent.trim().replace(/\s+/g, ' '), url: safeURL(a.href) };
   }
-  function zhCommentMeta(item) {
+  function zhihuCommentMeta(item) {
    let like = '', time = '';
    const likeEl = item.querySelector('[class*="VoteButton"], button[aria-label*="赞"]');
    if (likeEl) {
@@ -1070,7 +1335,7 @@
    if (tm) time = tm[0];
    return [like, time].filter(Boolean).join(' · ');
   }
-  function zhCommentReplyTo(item) {
+  function zhihuCommentReplyTo(item) {
    const metaLine = ((item.querySelector('[class*="meta"], [class*="Meta"]') || {}).textContent || '').replace(/\s+/g, ' ');
    const m = metaLine.match(/回复\s*@?([^\s：:]+)/);
    if (m) return m[1].trim();
@@ -1082,33 +1347,28 @@
    }
    return '';
   }
-  function zhCommentContentBlocks(item, skipNestedReplies) {
+  function zhihuCommentContentBlocks(item, skipNestedReplies) {
    const sels = ['.CommentItemV2-content', '.CommentContent', '[class*="CommentContent"]', '.ReplyItem-content', '.RichText'];
    let contentEl = null;
    for (const sel of sels) {
     const candidates = item.querySelectorAll(sel);
     for (const c of candidates) {
-     if (skipNestedReplies && c.closest(ZH_REPLY_ITEM) && !item.matches(ZH_REPLY_ITEM)) continue;
+     if (skipNestedReplies && c.closest(ZHIHU_REPLY_ITEM) && !item.matches(ZHIHU_REPLY_ITEM)) continue;
      if ((c.textContent || '').trim() || c.querySelector('img')) { contentEl = c; break; }
     }
     if (contentEl) break;
    }
    if (!contentEl) contentEl = item;
    const clone = contentEl.cloneNode(true);
-   if (skipNestedReplies) clone.querySelectorAll(ZH_REPLY_ITEM).forEach(n => n.remove());
-   clone.querySelectorAll(ZH_COMMENT_REMOVE).forEach(n => n.remove());
+   if (skipNestedReplies) clone.querySelectorAll(ZHIHU_REPLY_ITEM).forEach(n => n.remove());
+   clone.querySelectorAll(ZHIHU_COMMENT_REMOVE).forEach(n => n.remove());
    removeAvatarImgs(clone);
-   const frag = document.createDocumentFragment();
-   frag.appendChild(clone);
-   return parseBlocks(frag);
+   return blocksFromClone(clone);
   }
-  function zhCommentBullet(item, isReply) {
-   const { name, url } = zhCommentAuthor(item);
-   const bodyBlocks = zhCommentContentBlocks(item, !isReply);
-   const hasBody = bodyBlocks.some(b => {
-    if (b.type === 'paragraph') return (b.paragraph?.rich_text || []).some(t => (t.text?.content || '').trim());
-    return true;
-   });
+  function zhihuCommentBullet(item, isReply) {
+   const { name, url } = zhihuCommentAuthor(item);
+   const bodyBlocks = zhihuCommentContentBlocks(item, !isReply);
+   const hasBody = bodyBlocks.some(b => (b.type === 'paragraph' ? paraHasText(b) : true));
    if (!hasBody && !name) return null;
    const headerRT = [];
    if (name) {
@@ -1117,11 +1377,11 @@
     headerRT.push(nameNode);
    }
    if (isReply) {
-    const to = zhCommentReplyTo(item);
+    const to = zhihuCommentReplyTo(item);
     if (to) headerRT.push({ type: 'text', text: { content: ' 回复 ' + to } });
    }
    if (!isReply) {
-    const meta = zhCommentMeta(item);
+    const meta = zhihuCommentMeta(item);
     if (meta) headerRT.push({ type: 'text', text: { content: ' · ' + meta } });
    }
    const blk = mkBlockRT('bulleted_list_item', headerRT.length ? capRT(headerRT) : null);
@@ -1137,8 +1397,8 @@
     kids.push(b);
    }
    if (!isReply) {
-    for (const r of item.querySelectorAll(ZH_REPLY_ITEM)) {
-     const rb = zhCommentBullet(r, true);
+    for (const r of item.querySelectorAll(ZHIHU_REPLY_ITEM)) {
+     const rb = zhihuCommentBullet(r, true);
      if (rb) kids.push(rb);
     }
    }
@@ -1148,12 +1408,12 @@
   }
   function zhihuComments(root) {
    let items = [];
-   const singleReply = root.matches(ZH_REPLY_ITEM);
-   if (singleReply || root.matches(ZH_COMMENT_ITEM)) items = [root];
-   else items = [...root.querySelectorAll(ZH_COMMENT_ITEM)].filter(elm => !elm.parentElement?.closest(ZH_COMMENT_ITEM));
+   const singleReply = root.matches(ZHIHU_REPLY_ITEM);
+   if (singleReply || root.matches(ZHIHU_COMMENT_ITEM)) items = [root];
+   else items = [...root.querySelectorAll(ZHIHU_COMMENT_ITEM)].filter(elm => !elm.parentElement?.closest(ZHIHU_COMMENT_ITEM));
    const bullets = [];
    for (const it of items) {
-    const b = zhCommentBullet(it, singleReply);
+    const b = zhihuCommentBullet(it, singleReply);
     if (b) bullets.push(b);
    }
    if (!bullets.length) return [];
@@ -1164,14 +1424,17 @@
    return out;
   }
 
-  // ============================================================
-  // X / Twitter
-  // ============================================================
-  const upgradeTwImg = (u) => u ? u.replace(/([?&])name=(small|medium|large|360x360|900x900)\b/i, '$1name=orig') : u;
+  // ===== X(Twitter) 页面适配 =====
+  const upgradeTwImg = (u) => {
+   if (!u) return u;
+   if (/[?&]name=(small|medium|large|360x360|900x900)\b/i.test(u)) return u.replace(/([?&])name=(?:small|medium|large|360x360|900x900)\b/i, '$1name=orig');
+   if (/^https?:\/\/[^/?#]*\btwimg\.com\//i.test(u) && !/[?&]name=/i.test(u) && !/\.(png|jpe?g|gif|webp)([?#]|$)/i.test(u)) return u + (u.includes('?') ? '&' : '?') + 'name=orig';
+   return u;
+  };
   function twMediaBlocks(tweet) {
    const out = [], seen = new Set();
    const pushImg = (raw) => {
-    const url = upgradeTwImg(normURL(raw) || safeURL(raw));
+    const url = upgradeTwImg(normOrSafe(raw));
     if (!url || url.includes('placeholder') || seen.has(url)) return;
     const b = mkMedia('image', url);
     if (b) { seen.add(url); out.push(b); }
@@ -1186,7 +1449,7 @@
     if (!video) return;
     let got = false;
     for (const s of vp.querySelectorAll('source')) {
-     const u = normURL(s.src) || safeURL(s.src);
+     const u = normOrSafe(s.src);
      if (u) { const b = mkMedia('video', u); if (b && !seen.has(u)) { seen.add(u); out.push(b); got = true; } break; }
     }
     if (!got && video.poster) pushImg(video.poster);
@@ -1220,20 +1483,16 @@
    return mkRichPara(rt);
   }
   function twTextBlocks(tw) {
-   if (tw.getElementsByTagName('*').length > C.CLONE_NODE_MAX) return []; // v5.7.1：单推节点护栏（此前 Twitter 路径绕过 safeClone，病态节点可拖垮主线程）
+   if (tw.getElementsByTagName('*').length > C.CLONE_NODE_MAX) return [];
    const clone = tw.cloneNode(true);
-   // v5.5.0：剔除操作栏（回复/转推/点赞/书签/分享按钮内含计数文本）与浏览数容器，
-   // 避免正文块中混入 "23"、"1.2K" 之类游离数字
    clone.querySelectorAll('[data-testid="app-text-transition-container"],button[data-testid="reply"],button[data-testid="retweet"],button[data-testid="like"],button[data-testid="unlike"],button[data-testid="bookmark"],button[data-testid="share"]').forEach(n => n.remove());
    clone.querySelectorAll('img,video,[data-testid="tweetPhoto"],[data-testid="videoPlayer"]').forEach(n => n.remove());
-   const frag = document.createDocumentFragment();
-   frag.appendChild(clone);
-   return parseBlocks(frag);
+   return blocksFromClone(clone);
   }
   function twConversation() {
    if (!isTwitterStatus()) return null;
    const main = document.querySelector('main[role="main"]') || document.querySelector('div[data-testid="primaryColumn"]') || document.body;
-   const tweets = [...main.querySelectorAll('article[data-testid="tweet"]')].slice(0, C.TW_CONV_MAX); // v5.7.1：会话规模护栏，防长线程数百楼全量克隆卡顿
+   const tweets = [...main.querySelectorAll('article[data-testid="tweet"]')].slice(0, C.TW_CONV_MAX);
    if (!tweets.length) return null;
    const curId = (location.pathname.match(/\/status\/(\d+)/) || [])[1] || '';
    let focal = tweets.findIndex(tw => {
@@ -1274,8 +1533,10 @@
   }
 
   // ---------- 内容提取入口 ----------
-  function extractBlocks(target, opts) { // v5.7.1：新增 opts.altClick（Alt+单击 = Twitter 仅当前推文）
-   // v5.4.0：pageTitle() 只在入口计算一次，各分支复用，避免重复 document.querySelector
+  // 克隆体先挂到离屏 DocumentFragment 再交给 parseBlocks——直接传游离节点可安全遍历，但
+  // 统一入口后 5 处调用点不再各自重复 createDocumentFragment + appendChild 三连。
+  const blocksFromClone = (node, depth) => { const frag = document.createDocumentFragment(); frag.appendChild(node); return parseBlocks(frag, depth); };
+  function extractBlocks(target, opts) {
    const title = pageTitle();
    const tag = target.tagName;
    if (tag === 'IMG') {
@@ -1285,16 +1546,16 @@
     const b = mkMedia('image', url);
     return { blocks: b ? [b] : [], title };
    }
-   if (tag === 'VIDEO') { const b = mkMedia('video', videoSrc(target)); return { blocks: b ? [b] : [], title }; }
-   if (tag === 'IFRAME') { const b = mkMedia('embed', normURL(target.src) || safeURL(target.src)); return { blocks: b ? [b] : [], title }; }
+   if (tag === 'VIDEO') { return { blocks: mediaBlocks('video', videoSrc(target)), title }; }
+   if (tag === 'IFRAME') { return { blocks: mediaBlocks('embed', normOrSafe(target.src)), title }; }
    if (target.classList?.contains('GifPlayer')) { const m = gifMedia(target); if (m) { const b = mkMedia(m.type, m.url); return { blocks: b ? [b] : [], title }; } }
    if (isTwitter) {
-    const twConv = opts?.altClick ? null : twConversation(); // v5.7.1：Alt+单击 = 仅当前推文，跳过整线程会话模式
+    const twConv = opts?.altClick ? null : twConversation();
     if (twConv) return { blocks: twConv, title };
     const article = target.closest('article[data-testid="tweet"]');
     if (article) return { blocks: [twAuthorHeader(article), ...twTextBlocks(article), ...twMediaBlocks(article)], title };
    }
-   if (isZhihu && target.matches && (target.matches(ZH_REPLY_ITEM) || target.matches(ZH_COMMENT_ITEM) || target.matches(ZH_COMMENT_BOX))) {
+   if (isZhihu && target.matches && (target.matches(ZHIHU_REPLY_ITEM) || target.matches(ZHIHU_COMMENT_ITEM) || target.matches(ZHIHU_COMMENT_BOX))) {
     const cb = zhihuComments(target);
     if (cb.length) return { blocks: cb, title };
    }
@@ -1305,9 +1566,7 @@
     const srcUrl = zhihuSourceURL(target);
     if (qTitle) for (const s of ['.ContentItem-title', 'h2.ContentItem-title']) clone.querySelectorAll(s).forEach(n => n.remove());
     cleanZhihu(clone);
-    const frag = document.createDocumentFragment();
-    frag.appendChild(clone);
-    const body = parseBlocks(frag);
+    const body = blocksFromClone(clone);
     const prefix = [];
     if (qTitle) prefix.push(mkH(2, qTitle));
     const author = zhihuAuthor(target);
@@ -1315,23 +1574,21 @@
     if (srcUrl) prefix.push(mkRichPara([{ type: 'text', text: { content: qTitle ? '🔗 问题链接' : '🔗 原文链接', link: { url: srcUrl } } }]));
     return { blocks: [...prefix, ...body], title: qTitle || title };
    }
-   const frag = document.createDocumentFragment();
-   frag.appendChild(clone);
-   return { blocks: parseBlocks(frag), title };
+   return { blocks: blocksFromClone(clone), title };
   }
   function findTarget(node) {
    if (!node || node === document.body || node === document.documentElement || isOwn(node)) return null;
    const tag = node.tagName;
    if (tag === 'IMG') return (!isAvatar(node) && !isZhihuMember(node) && realImgSrc(node)) ? node : null;
    if (tag === 'VIDEO' && videoSrc(node)) return node;
-   if (tag === 'IFRAME' && (normURL(node.src) || safeURL(node.src))) return node;
+   if (tag === 'IFRAME' && normOrSafe(node.src)) return node;
    if (node.classList?.contains('GifPlayer')) return node;
    if (isZhihu) {
-    const cReply = node.closest(ZH_REPLY_ITEM);
+    const cReply = node.closest(ZHIHU_REPLY_ITEM);
     if (cReply) return cReply;
-    const cItem = node.closest(ZH_COMMENT_ITEM);
+    const cItem = node.closest(ZHIHU_COMMENT_ITEM);
     if (cItem) return cItem;
-    const cBox = node.closest(ZH_COMMENT_BOX);
+    const cBox = node.closest(ZHIHU_COMMENT_BOX);
     if (cBox) { const cr = cBox.getBoundingClientRect(); if (cr.width > 50 && cr.height > 100) return cBox; }
     for (const s of ['.AnswerItem', '.PostIndex-answerItem', '.List-item', '.QuestionAnswer-content', '[itemprop="suggestedAnswer"]', '.ContentItem', '.Card', '.RichContent', '.RichContent-inner', '.Answer', '.Post-RichTextContainer', '[itemprop="text"]', '.RichText', 'article']) {
      const card = node.closest(s);
@@ -1343,13 +1600,13 @@
    while (cur && cur !== document.body && cur !== document.documentElement) {
     if (BLOCK_TAGS.has(cur.tagName)) {
      const r = cur.getBoundingClientRect();
-     // v5.5.0 修复：命中即返回。此前 PRE/TABLE 仅记入 leaf 并继续上溯，
-     // 导致悬停代码块/表格时被外层 DIV 等容器抢占（leaf 分支几乎永远不可达）
      if (r.width > 20 && r.height > 20) return cur;
     }
     cur = cur.parentElement;
    }
-   return node.closest('p,div,li,blockquote') || null;
+   const fb = node.closest('p,div,li,blockquote');
+   if (fb) { const fr = fb.getBoundingClientRect(); if (fr.width > 0 && fr.height > 0) return fb; }
+   return null;
   }
   function describeElement(elm) {
    if (!elm) return '';
@@ -1359,9 +1616,7 @@
    return tag + (id ? id : cls ? '.' + cls : '');
   }
 
-  // ============================================================
-  // v5.6.0：选取粒度调节——↑ 扩大到外层容器 / ↓ 缩回内层目标
-  // ============================================================
+  // ===== 选取候选与范围 =====
   function buildCandidates(best) {
    const cands = [best];
    let cur = best.parentElement;
@@ -1374,17 +1629,25 @@
    }
    return cands;
   }
+  // 选取提示变更检测——每次鼠标帧回调都重写 el.tip.textContent，
+  // 同一目标上移动鼠标时为纯冗余 DOM 写入；签名（元素描述+索引+候选数）未变时跳过。
+  // positionHL 仍每帧执行（元素位置可能随页面变化），仅文本写入被短路。
+  // 元素描述串随候选集重建时缓存（selDesc），签名比对不再逐帧 describeElement
+  // （原实现每帧对当前目标做 className split/拼接）；锚点不变时 selDesc 稳定，行为等价。
+  let tipSig = '', selDesc = '';
   function applySelection() {
    const t = selCands[selIdx];
    if (!t) return;
    hlTarget = t;
    positionHL(t);
-   el.tip.textContent = `🔍 ${describeElement(t)} — 单击提取 · ↑↓ 调整范围 (${selIdx + 1}/${selCands.length})`;
+   const sig = `${selDesc}|${selIdx}/${selCands.length}`;
+   if (sig !== tipSig) {
+    tipSig = sig;
+    el.tip.textContent = `🔍 ${selDesc} — 单击提取 · ↑↓ 调整范围 (${selIdx + 1}/${selCands.length})`;
+   }
   }
 
-  // ============================================================
-  // 悬浮按钮：拖拽 / 贴边 / 持久化
-  // ============================================================
+  // ===== 悬浮球位置与拖拽 =====
   const clampPos = (l, t) => ({ left: Math.max(0, Math.min(l, innerWidth - C.BTN_SIZE)), top: Math.max(0, Math.min(t, innerHeight - C.BTN_SIZE)) });
   function fullFromHidden(edge, l, t) {
    if (edge === 'left') l = 0; if (edge === 'right') l = innerWidth - C.BTN_SIZE;
@@ -1398,39 +1661,55 @@
    if (edge === 'bottom') t = innerHeight - C.VISIBLE_PART;
    return { left: l, top: t };
   }
+  // right / bottom 写一次即可——拖拽期间 mousemove 以 ~60Hz 调用 applyPos，
+  // 原实现每次写 4 个样式属性（每次写入都使样式失效触发重算），实际 left/top 变化、right/bottom 恒为 'auto'。
+  // 写一次守卫将高频样式写入从 4 次降为 2 次。
+  let btnPosAutoWritten = false;
   function applyPos(l, t) {
    const p = clampPos(l, t);
    el.btn.style.left = p.left + 'px';
    el.btn.style.top = p.top + 'px';
-   el.btn.style.right = 'auto';
-   el.btn.style.bottom = 'auto';
+   if (!btnPosAutoWritten) { el.btn.style.right = 'auto'; el.btn.style.bottom = 'auto'; btnPosAutoWritten = true; }
   }
   const showFull = () => { el.btn.classList.remove('edge'); hidden = false; hiddenEdge = ''; };
   const hideTo = (e) => { el.btn.classList.add('edge'); hidden = true; hiddenEdge = e; };
+  function revealFromEdge() {
+   if (!hidden) return;
+   const r = el.btn.getBoundingClientRect();
+   const fp = fullFromHidden(hiddenEdge, r.left, r.top);
+   applyPos(fp.left, fp.top); showFull();
+  }
+  // 悬浮球存储位置内存缓存——大图隐藏 / 恢复与窗口 resize 路径每次同步 GM_getValue × 2，
+  // 高频命中下反复跨上下文读取；缓存由 savePos/loadPos 维护，首次未缓存时才读存储，行为等价。
+  let memBtnPos = null;
   function savePos() {
    const r = el.btn.getBoundingClientRect();
    let fl = r.left, ft = r.top;
    if (hidden) { const p = fullFromHidden(hiddenEdge, fl, ft); fl = p.left; ft = p.top; }
    const c = clampPos(fl, ft);
+   memBtnPos = c;
    GM_setValue(STORAGE.BTN_LEFT, c.left);
    GM_setValue(STORAGE.BTN_TOP, c.top);
    GM_setValue(STORAGE.BTN_HIDDEN, hidden);
    GM_setValue(STORAGE.BTN_EDGE, hiddenEdge);
   }
+  const storedBtnPos = () => {
+   if (memBtnPos) return memBtnPos;
+   const l = GM_getValue(STORAGE.BTN_LEFT, null), t = GM_getValue(STORAGE.BTN_TOP, null);
+   memBtnPos = (l === null || t === null) ? null : clampPos(l, t);
+   return memBtnPos;
+  };
+  function applyHiddenAt(edge, l, t) { const hp = hiddenPos(edge, l, t); applyPos(hp.left, hp.top); hideTo(edge); }
   function loadPos() {
-   const sl = GM_getValue(STORAGE.BTN_LEFT, null);
-   const st = GM_getValue(STORAGE.BTN_TOP, null);
-   if (sl === null || st === null) return;
-   const c = clampPos(sl, st);
-   if (GM_getValue(STORAGE.BTN_HIDDEN, false) && GM_getValue(STORAGE.BTN_EDGE, '')) {
-    const edge = GM_getValue(STORAGE.BTN_EDGE, '');
-    const hp = hiddenPos(edge, c.left, c.top);
-    applyPos(hp.left, hp.top); hideTo(edge);
-   } else {
-    applyPos(c.left, c.top); showFull();
-   }
+   const c = storedBtnPos();
+   if (!c) return;
+   const edge = GM_getValue(STORAGE.BTN_EDGE, '');
+   if (GM_getValue(STORAGE.BTN_HIDDEN, false) && edge) applyHiddenAt(edge, c.left, c.top);
+   else { applyPos(c.left, c.top); showFull(); }
   }
   function snap(l, t) {
+   // 大图隐藏期间悬浮球为 display:none，rect 读得全零——据此计算会把存储位置覆写成视口左上角并误判贴边
+   if (hiddenForImg) return;
    let edge = '';
    if (l < C.SNAP_THRESHOLD) edge = 'left';
    else if (l + C.BTN_SIZE > innerWidth - C.SNAP_THRESHOLD) edge = 'right';
@@ -1443,7 +1722,7 @@
   el.btn.addEventListener('mouseenter', () => {
    if (dragging || hiddenForImg) return;
    clearTimeout(hoverTimer);
-   if (hidden) { const r = el.btn.getBoundingClientRect(); const fp = fullFromHidden(hiddenEdge, r.left, r.top); applyPos(fp.left, fp.top); showFull(); }
+   revealFromEdge();
   }, { signal });
   el.btn.addEventListener('mouseleave', () => {
    if (dragging || hidden) return;
@@ -1457,31 +1736,36 @@
    if (e.button === 2) return;
    e.preventDefault(); e.stopPropagation();
    dragging = true; el.btn.style.transition = 'none';
-   if (hidden) { const r = el.btn.getBoundingClientRect(); const fp = fullFromHidden(hiddenEdge, r.left, r.top); applyPos(fp.left, fp.top); showFull(); }
+   revealFromEdge();
    const r = el.btn.getBoundingClientRect();
    dragSX = e.clientX; dragSY = e.clientY; dragIL = r.left; dragIT = r.top;
   }, { signal });
+  let dragResetTimer = null;
+  const clearDragReset = () => { if (dragResetTimer) { clearTimeout(dragResetTimer); dragResetTimer = null; } };
   function dragEnd(e) {
    if (!dragging) return;
    dragging = false; el.btn.style.transition = '';
+   clearDragReset();
    const dx = e.clientX - dragSX, dy = e.clientY - dragSY;
    dragDist = Math.sqrt(dx * dx + dy * dy);
    if (dragDist <= C.DRAG_CLICK_PX) { savePos(); return; }
    const r = el.btn.getBoundingClientRect(); snap(r.left, r.top);
-   setTimeout(() => { dragDist = 0; }, 300);
+   dragResetTimer = setTimeout(() => { dragResetTimer = null; dragDist = 0; }, 300);
   }
-  function cancelDrag() { if (!dragging) return; dragging = false; dragDist = 0; el.btn.style.transition = ''; }
+  function cancelDrag() { if (!dragging) return; dragging = false; dragDist = 0; el.btn.style.transition = ''; clearDragReset(); }
   el.btn.addEventListener('click', (e) => {
    if (dragDist > C.DRAG_CLICK_PX) { e.preventDefault(); e.stopPropagation(); dragDist = 0; return; }
-   if (hidden) { e.preventDefault(); e.stopPropagation(); const r = el.btn.getBoundingClientRect(); const fp = fullFromHidden(hiddenEdge, r.left, r.top); applyPos(fp.left, fp.top); showFull(); savePos(); dragDist = 0; return; }
-   e.stopPropagation(); triggerClipper(); dragDist = 0;
+   if (hidden) { e.preventDefault(); e.stopPropagation(); revealFromEdge(); savePos(); dragDist = 0; return; }
+   e.stopPropagation(); startPickFlow(); dragDist = 0;
   }, { signal });
   el.btn.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); openSettings(); }, { signal });
+  // 大图隐藏期间（display:none）窗口 resize 会读到全零 rect 并把悬浮球重定位到 (0,0)，故直接跳过该期间的重定位；
+  // 恢复时按当前坐标收敛到视口内即可（窗口可能在隐藏期间缩小），无需重读存储，省去 4 次 GM 读取。
   function onResize() {
+   if (hiddenForImg) return;
    if (hidden) {
-    const sl = GM_getValue(STORAGE.BTN_LEFT, null);
-    const st = GM_getValue(STORAGE.BTN_TOP, null);
-    if (sl !== null && st !== null) { const c = clampPos(sl, st); const hp = hiddenPos(hiddenEdge, c.left, c.top); applyPos(hp.left, hp.top); }
+    const c = storedBtnPos();
+    if (c) applyHiddenAt(hiddenEdge, c.left, c.top);
    } else {
     const r = el.btn.getBoundingClientRect(); applyPos(r.left, r.top);
    }
@@ -1509,45 +1793,60 @@
      if (!hiddenForImg) { hiddenForImg = true; el.btn.style.display = 'none'; }
     } else if (hiddenForImg) {
      hiddenForImg = false; el.btn.style.display = '';
-     if (hidden) {
-      const sl = GM_getValue(STORAGE.BTN_LEFT, null);
-      const st = GM_getValue(STORAGE.BTN_TOP, null);
-      if (sl !== null && st !== null) { const c = clampPos(sl, st); const hp = hiddenPos(hiddenEdge, c.left, c.top); applyPos(hp.left, hp.top); hideTo(hiddenEdge); }
-     } else loadPos();
+     // 隐藏期间未改动 left / top（onResize 已跳过），恢复只需按当前坐标收敛到视口内，无需重读存储重定位。
+     if (hidden) { const c = storedBtnPos(); if (c) applyHiddenAt(hiddenEdge, c.left, c.top); }
+     else { const r = el.btn.getBoundingClientRect(); applyPos(r.left, r.top); }
     }
    });
   }
   function onDocMouseUp(e) { if (dragging) dragEnd(e); }
   document.addEventListener('mousemove', onDocMouseMove, { signal, capture: true });
   document.addEventListener('mouseup', onDocMouseUp, { signal, capture: true });
+  // 鼠标在视口外（浏览器工具栏 / 另一窗口 / 屏幕边缘）松手时，mouseup 不会派发到本页文档，
+  // dragging 会一直停在 true：此后无按键移动也会跟随鼠标，且捕获阶段 preventDefault 抑制文本选择。
+  // window.blur 只覆盖切换窗口，补 mouseleave 覆盖「拖出视口即松手」。
+  document.addEventListener('mouseleave', cancelDrag, { signal });
   window.addEventListener('blur', cancelDrag, { signal });
   _cleanupFns.push(() => { if (largeImgRafId) cancelAnimationFrame(largeImgRafId); });
+  _cleanupFns.push(() => { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } });
 
-  // ============================================================
-  // 选取模式
-  // ============================================================
+  // ===== 高亮与选取交互 =====
+  // 高亮框几何签名：选取期间 applySelection 逐帧调用 positionHL，而鼠标常驻同一元素时矩形不变，
+  // 逐帧重写 4 个样式属性纯属冗余；clearHL 复位签名以保证 display:block 下次必写。
+  let hlSig = '';
   function positionHL(target) {
    const r = target.getBoundingClientRect();
+   const sig = `${r.left}|${r.top}|${r.width}|${r.height}`;
+   if (sig === hlSig) return;
+   hlSig = sig;
    el.hl.style.display = 'block';
    el.hl.style.width = r.width + 'px';
    el.hl.style.height = r.height + 'px';
    el.hl.style.transform = `translate(${r.left}px,${r.top}px)`;
   }
-  function clearHL() { el.hl.style.display = 'none'; hlTarget = null; selAnchor = null; }
+  function clearHL() { el.hl.style.display = 'none'; hlTarget = null; selAnchor = null; hlSig = ''; }
+  // 遮罩属本脚本 shadow 子树，页面侧命中测试只暴露 host，按 isOwn 过滤即得遮罩下的顶层页面元素；
+  // 替代「临时关遮罩 pointer-events 再还原」的写法，免去每次命中的两次样式写与随之而来的样式重算。
+  function topPageElementAt(x, y) {
+   for (const n of document.elementsFromPoint(x, y)) if (!isOwn(n)) return n;
+   return null;
+  }
+  let hoverX = 0, hoverY = 0;
   function onHoverMove(e) {
-   if (rafId) cancelAnimationFrame(rafId);
+   hoverX = e.clientX; hoverY = e.clientY;
+   if (rafId) return;
    rafId = requestAnimationFrame(() => {
-    el.mask.style.pointerEvents = 'none';
-    const t = document.elementFromPoint(e.clientX, e.clientY);
-    el.mask.style.pointerEvents = '';
-    if (!t || isOwn(t)) { clearHL(); return; }
+    rafId = null;
+    if (!selecting) return;
+    const t = topPageElementAt(hoverX, hoverY);
+    if (!t) { clearHL(); return; }
     const best = findTarget(t);
     if (best) {
-     // v5.6.0：悬停目标变化时重建候选链；未变化则保留用户已调好的层级
      if (best !== selAnchor) {
       selAnchor = best;
       selCands = buildCandidates(best);
       selIdx = 0;
+      selDesc = describeElement(best);
      }
      applySelection();
     } else clearHL();
@@ -1560,20 +1859,16 @@
   }
   el.mask.addEventListener('click', (e) => {
    e.preventDefault(); e.stopPropagation();
-   el.mask.style.pointerEvents = 'none';
-   const t = document.elementFromPoint(e.clientX, e.clientY);
-   el.mask.style.pointerEvents = '';
-   if (!t || isOwn(t)) return;
-   // v5.6.0：优先提取当前高亮目标（保留用户用 ↑↓ 调好的层级），无高亮时回退即时计算
+   const t = topPageElementAt(e.clientX, e.clientY);
+   if (!t) return;
    const best = (hlTarget && document.contains(hlTarget)) ? hlTarget : findTarget(t);
    if (!best) return;
    try {
-    const { blocks: b, title } = extractBlocks(best, { altClick: e.altKey }); // v5.7.1：透传 Alt 修饰键
+    const { blocks: b, title } = extractBlocks(best, { altClick: e.altKey });
     if (!b.length) { toast('所选元素未提取到有效内容', 'error'); return; }
     if (b.length > C.BLOCKS_WARN) toast(`提取了 ${b.length} 个块，内容较多，发送可能较慢`, 'info');
     stopSelect();
     if (appendMode) {
-     // v5.5.0：追加模式——新块并入当前内容，保留标题/标签输入，回到确认弹窗
      appendMode = false;
      blocks = blocks.concat(b);
      refreshPreview();
@@ -1591,12 +1886,11 @@
    if (e.key !== 'Escape') return;
    e.preventDefault();
    if (!selecting) return;
-   const wasAppend = appendMode; // v5.5.0：追加模式下 Esc = 放弃本次追加并返回弹窗
+   const wasAppend = appendMode;
    appendMode = false;
    stopSelect();
    if (wasAppend) openConfirm();
   }
-  // v5.6.0：↑ 扩大选取范围（更外层容器）/ ↓ 缩小（更内层目标）
   function onSelKey(e) {
    if (!selecting || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
    e.preventDefault(); e.stopPropagation();
@@ -1609,15 +1903,14 @@
    selecting = true;
    if (modeAc) { modeAc.abort(); modeAc = null; }
    modeAc = new AbortController();
-   selCands = []; selIdx = 0; selAnchor = null;
-   el.tip.textContent = appendMode ? '🔍 追加模式：悬停高亮元素，单击追加 (↑↓调范围 · Esc返回)' : `🔍 悬停高亮元素，单击提取内容 (↑↓调整范围 · Esc取消${isTwitterStatus() ? ' · Alt+单击仅本条' : ''})`; // v5.7.1：推文页提示单条模式
+   selCands = []; selIdx = 0; selAnchor = null; tipSig = ''; selDesc = '';
+   el.tip.textContent = appendMode ? '🔍 追加模式：悬停高亮元素，单击追加 (↑↓调范围 · Esc返回)' : `🔍 悬停高亮元素，单击提取内容 (↑↓调整范围 · Esc取消${isTwitterStatus() ? ' · Alt+单击仅本条' : ''})`;
    el.tip.style.display = 'block';
    el.mask.style.display = 'block';
    document.body.style.cursor = 'crosshair';
-   // v5.5.0：监听挂到模式级 signal 上，stopSelect 时随 abort 一并移除（修复累积泄漏）
    document.addEventListener('keydown', onEsc, { signal: modeAc.signal, capture: true });
    document.addEventListener('keydown', onSelKey, { signal: modeAc.signal, capture: true });
-   document.addEventListener('scroll', onScroll, { signal: modeAc.signal, capture: true });
+   document.addEventListener('scroll', onScroll, { signal: modeAc.signal, capture: true, passive: true });
   }
   function stopSelect() {
    if (!selecting) return;
@@ -1628,12 +1921,10 @@
    clearHL();
    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
    if (modeAc) { modeAc.abort(); modeAc = null; }
-   selCands = []; selIdx = 0; selAnchor = null; // v5.6.0
+   selCands = []; selIdx = 0; selAnchor = null; tipSig = ''; selDesc = '';
   }
 
-  // ============================================================
-  // 预览 / 确认弹窗
-  // ============================================================
+  // ===== 预览渲染 =====
   function renderPreview(block, container, idx, depth = 0) {
    if (depth > C.PREVIEW_DEPTH_MAX) return;
    const wrap = document.createElement('div');
@@ -1644,18 +1935,21 @@
    if (type === 'paragraph') {
     const p = document.createElement('p');
     for (const rt of block.paragraph?.rich_text || []) {
-     if (rt.text?.link) { const a = document.createElement('a'); a.href = rt.text.link.url; a.textContent = rt.text.content; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.appendChild(a); }
+     // 渲染层协议复验：链接来源链路均经 safeURL，此处兜底再拦一道，防上游改动引入 javascript: 等协议
+     const linkUrl = rt.text?.link ? safeURL(rt.text.link.url) : null;
+     if (linkUrl) { const a = document.createElement('a'); a.href = linkUrl; a.textContent = rt.text.content; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.appendChild(a); }
      else p.appendChild(document.createTextNode(rt.text?.content || ''));
     }
     content = p;
-   } else if (type.startsWith('heading')) {
-    const lv = type.split('_')[1];
-    const h = document.createElement(`h${lv}`);
+   } else if (/^heading_[1-6]$/.test(type)) {
+    const h = document.createElement(`h${type.split('_')[1]}`);
     h.textContent = rtStr(block[type]?.rich_text);
     content = h;
    } else if (type === 'bulleted_list_item' || type === 'numbered_list_item') {
     const li = document.createElement('li');
     li.textContent = rtStr(block[type]?.rich_text);
+    // 有序列表预览用数字序号，与发送后 Notion / 飞书观感一致
+    if (type === 'numbered_list_item') li.style.listStyleType = 'decimal';
     content = li;
    } else if (type === 'quote') {
     const bq = document.createElement('blockquote');
@@ -1668,8 +1962,13 @@
    } else if (type === 'image') {
     const img = document.createElement('img');
     const src = block.image?.external?.url || '';
+    img.loading = 'lazy'; img.decoding = 'async';
     img.src = src;
-    img.onerror = () => { img.style.display = 'none'; img.onerror = null; };
+    img.onerror = () => {
+     img.onerror = null; img.style.display = 'none';
+     const ph = document.createElement('div'); ph.className = 'nc-pv-img-err'; ph.textContent = '🖼️ 图片加载失败';
+     img.after(ph);
+    };
     content = img;
    } else if (type === 'video') {
     const div = document.createElement('div'); div.className = 'nc-mp';
@@ -1680,25 +1979,22 @@
     div.textContent = `📺 嵌入: ${block.embed?.url || ''}`;
     content = div;
    } else if (type === 'table') {
+    // 表格外观全部由 PANEL_CSS 的 .nc-pv table / td / th 规则承载，无需逐单元格内联样式
     const table = document.createElement('table');
-    table.style.cssText = 'border-collapse:collapse;width:100%';
     const rows = block.table?.children || [];
     rows.forEach((row, ri) => {
      const tr = document.createElement('tr');
-     const isHeader = ri === 0 && block.table.has_column_header;
+     const isHeader = ri === 0 && !!block.table?.has_column_header;
      for (const cell of row.table_row?.cells || []) {
       const td = document.createElement(isHeader ? 'th' : 'td');
       td.textContent = cellText(cell);
-      td.style.cssText = 'border:1px solid var(--c-td-border);padding:4px';
-      if (isHeader) td.style.fontWeight = '700';
       tr.appendChild(td);
      }
      table.appendChild(tr);
     });
     content = table;
    } else if (type === 'divider') {
-    const hr = document.createElement('hr');
-    hr.style.cssText = 'border:none;border-top:1px dashed #ccc;margin:6px 0';
+    const hr = document.createElement('hr'); // 样式由 .nc-pv hr 提供，内联色不随暗色主题切换
     content = hr;
    } else if (type === 'toggle') {
     const det = document.createElement('details');
@@ -1718,7 +2014,7 @@
     if (Array.isArray(kids) && kids.length && kids[0]?.type) {
      const kd = document.createElement('div');
      kd.className = 'nc-pv-kids';
-     kids.forEach(k => renderPreview(k, kd, -1, depth + 1)); // v5.7.1：补传深度，与 toggle 分支对齐，防未来嵌套结构绕过 PREVIEW_DEPTH_MAX
+     kids.forEach(k => renderPreview(k, kd, -1, depth + 1));
      wrap.appendChild(kd);
     }
    }
@@ -1726,8 +2022,7 @@
   }
   function textFromBlocks(bks) {
    const parts = [];
-   // v5.5.0：改为递归——补齐此前被整体丢弃的表格行、折叠块子内容与列表子块
-   const walk = (arr) => {
+   const collectLines = (arr) => {
     for (const b of arr) {
      if (!b) continue;
      const rt = b[b.type]?.rich_text;
@@ -1743,16 +2038,21 @@
       }
      }
      const kids = b[b.type]?.children;
-     if (Array.isArray(kids) && kids.length) walk(kids);
+     if (Array.isArray(kids) && kids.length) collectLines(kids);
     }
    };
-   walk(bks);
+   collectLines(bks);
    return parts.join('\n');
   }
+  // DocumentFragment 批量渲染——逐块直接 append 到可见容器，
+  // 每次插入都可能触发样式/布局计算；离屏 Fragment 组装完成后单次挂载，
+  // 数百块内容的预览刷新（含删除单块后的全量重建）显著减少布局抖动。
   function refreshPreview() {
    el.pv.innerHTML = '';
-   if (!blocks.length) { el.pv.textContent = '无内容'; el.pvCount.textContent = ''; return; }
-   blocks.forEach((b, i) => renderPreview(b, el.pv, i));
+   if (!blocks.length) { el.pv.innerHTML = '<div class="nc-empty"><b>无内容</b>重新选取页面元素即可添加</div>'; el.pvCount.textContent = ''; return; }
+   const frag = document.createDocumentFragment();
+   blocks.forEach((b, i) => renderPreview(b, frag, i));
+   el.pv.appendChild(frag);
    el.pvCount.textContent = `共 ${blocks.length} 个块`;
   }
   el.pv.addEventListener('click', (e) => {
@@ -1766,36 +2066,36 @@
   }, { signal });
   function showConfirm(title) {
    el.title.value = title || pageTitle();
-   // v5.6.0：域名默认标签优先（含子域匹配），未命中回填上次使用的标签
    el.tags.value = matchDomainTags(S.domainTags, location.hostname) || GM_getValue(STORAGE.LAST_TAGS, '');
    refreshPreview();
    hideProgress();
+   restoreConfirmModal();
+   openConfirm();
+  }
+  function restoreConfirmModal() {
    el.modalCfm.classList.remove('minimized');
    el.btnMin.textContent = '🔽';
    el.btnMin.title = '最小化';
-   openConfirm();
   }
-  // v5.5.0：统一「打开确认弹窗」入口——每次进入都重建模式信号并挂载 onConfirmKey。
-  // 修复两处缺陷：① showConfirm 每次剪藏都追加一个从不移除的 keydown 监听（累积泄漏）；
-  // ② doRetry 直接拉起弹窗却从未挂监听，导致重试后 Ctrl+Enter 发送失效。
   function openConfirm() {
    if (modeAc) { modeAc.abort(); modeAc = null; }
    modeAc = new AbortController();
    document.addEventListener('keydown', onConfirmKey, { signal: modeAc.signal, capture: true });
+   rememberFocus();
    el.ovCfm.style.display = 'flex';
    confirmOpen = true;
+   el.title.focus();
   }
-  const closeConfirm = () => { if (modeAc) { modeAc.abort(); modeAc = null; } el.ovCfm.style.display = 'none'; confirmOpen = false; };
+  const closeConfirm = () => { if (modeAc) { modeAc.abort(); modeAc = null; } el.ovCfm.style.display = 'none'; confirmOpen = false; restoreFocus(); };
   function onConfirmKey(e) {
    if (!confirmOpen) return;
-   // v5.7.1：Esc 统一由先注册的 onModalEsc 处理（其 stopImmediatePropagation 会阻断本监听，此处原 Esc 分支为不可达死代码，已删）
    if (el.modalCfm.classList.contains('minimized')) return;
    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); doSend(); return; }
    if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) {
-    const active = e.target;
-    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
-    const docActive = document.activeElement;
-    if (docActive && (docActive.tagName === 'INPUT' || docActive.tagName === 'TEXTAREA')) return;
+    const sa = shadow.activeElement;
+    if (sa && (sa.tagName === 'INPUT' || sa.tagName === 'TEXTAREA')) return;
+    const ae = (e.composedPath && e.composedPath()[0]) || e.target;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
     e.preventDefault(); el.pv.focus();
     const sel = window.getSelection();
     if (sel) {
@@ -1804,65 +2104,156 @@
     }
    }
   }
+  function tryCloseSettings() {
+   if (settingsDirty) {
+    if (!confirm('有未保存的更改，确定关闭？')) return false;
+    settingsDirty = false;
+    if (el.dirtyFlag) el.dirtyFlag.style.display = 'none';
+   }
+   return true;
+  }
   function onModalEsc(e) {
    if (e.key !== 'Escape') return;
    for (const ov of [el.ovCfm, el.ovErr, el.ovOk, el.ovSet]) {
     if (ov.style.display === 'flex') {
-     // v5.2.0：Esc 关闭设置面板前检查未保存更改（与“关闭”按钮行为对齐）
-     if (ov === el.ovSet && settingsDirty) {
-      if (!confirm('有未保存的更改，确定关闭？')) return;
-      settingsDirty = false; if (el.dirtyFlag) el.dirtyFlag.style.display = 'none';
-     }
+     if (ov === el.ovSet && !tryCloseSettings()) return;
      e.preventDefault();
      e.stopImmediatePropagation();
-     // v5.5.0：确认弹窗改走 closeConfirm()，确保模式信号被 abort（监听随移除）
      if (ov === el.ovCfm) { closeConfirm(); return; }
-     ov.style.display = 'none';
+     if (ov === el.ovSet) closeSettings();
+     else ov.style.display = 'none';
      return;
     }
    }
   }
   document.addEventListener('keydown', onModalEsc, { signal, capture: true });
+  // ===== 发送历史与设置弹窗 =====
+  // 单遍替换——串 4 次全文正则遍历（&、<、>、" 各一次）
+  // 改为一次遍历 + 查表映射；发送历史渲染对每条记录调用，文本越长收益越大。转义顺序问题不复存在（单遍无二次转义风险）。
+  const _ESC_MAP = Object.freeze({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' });
+  function escHtml(s) { return String(s).replace(/[&<>"]/g, ch => _ESC_MAP[ch]); }
+  function readSendHistory() {
+   try { const list = JSON.parse(GM_getValue(STORAGE.HISTORY, '[]')); return Array.isArray(list) ? list : []; }
+   catch { return []; }
+  }
+  function recordSendHistory(title, platforms) {
+   try {
+    const list = readSendHistory();
+    list.unshift({ t: Date.now(), title: String(title || '').slice(0, 120), p: (platforms || []).slice(0, 4) });
+    GM_setValue(STORAGE.HISTORY, JSON.stringify(list.slice(0, C.HISTORY_MAX)));
+   } catch {   }
+  }
+  function renderSendHistory() {
+   if (!el.histList) return;
+   const recent = readSendHistory().slice(0, 5);
+   el.histList.innerHTML = recent.length ? recent.map((h) => {
+    const d = new Date(h.t || 0);
+    const time = isNaN(d.getTime()) ? '—' : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    const plats = Array.isArray(h.p) ? h.p.join('、') : '';
+    return `<div class="nc-hist-item"><span class="nc-hist-time">${escHtml(time)}</span><span class="nc-hist-title" title="${escHtml(h.title || '')}">${escHtml(h.title || '(无标题)')}</span><span class="nc-hist-plat">${escHtml(plats)}</span></div>`;
+   }).join('') : '<div class="nc-hist-empty">暂无发送记录</div>';
+  }
   function openSettings() {
    refreshSettings();
-   const s = S;
-   el.tok.value = s.notionToken;
-   el.db.value = s.notionDbId;
-   el.tag.value = s.notionTagsProp;
-   el.fsAppId.value = s.fsAppId;
-   el.fsSecret.value = s.fsAppSecret;
-   el.fsFolder.value = s.fsFolder;
+   for (const f of FORM_FIELDS) f.input.value = S[f.snap];
    el.ckNotion.checked = isNotionEnabled();
    el.ckFeishu.checked = isFeishuEnabled();
    el.ckObsidian.checked = isObsidianEnabled();
-   el.obsApiUrl.value = s.obsApiUrl;
-   el.obsApiKey.value = s.obsApiKey;
-   el.obsFolder.value = s.obsFolder;
-   el.blocklist.value = s.blocklist || ''; // v5.6.0
-   el.domainTags.value = s.domainTags || ''; // v5.6.0
-   el.sendProfile.value = (s.sendProfile === 'standard') ? 'standard' : 'gentle'; // v5.7.0
-   // 重置所有密码框为隐藏态
-   for (const { input, btn } of [{ input: el.tok, btn: el.tokTglNotion }, { input: el.fsSecret, btn: el.tokTglFeishu }, { input: el.obsApiKey, btn: el.tokTglObs }]) {
+   el.sendProfile.value = (S.sendProfile === 'standard') ? 'standard' : 'gentle';
+   for (const { input, btn } of [{ input: el.tok, btn: el.tokTglNotion }, { input: el.fsSecret, btn: el.tokTglFeishu }, { input: el.obsApiKey, btn: el.tokTglObsidian }]) {
     input.type = 'password'; btn.textContent = '👁️';
    }
    settingsDirty = false;
    if (el.dirtyFlag) el.dirtyFlag.style.display = 'none';
+   renderSendHistory();
+   rememberFocus();
    el.ovSet.style.display = 'flex';
+   el.blocklist.focus();
    if (!settingsListenersAttached) {
-    const inputs = [el.tok, el.db, el.tag, el.fsAppId, el.fsSecret, el.fsFolder, el.ckNotion, el.ckFeishu, el.ckObsidian, el.obsApiUrl, el.obsApiKey, el.obsFolder, el.blocklist, el.domainTags, el.sendProfile];
+    const inputs = FORM_FIELDS.map(f => f.input).concat([el.ckNotion, el.ckFeishu, el.ckObsidian, el.sendProfile]);
     const onInputChange = () => { settingsDirty = true; if (el.dirtyFlag) el.dirtyFlag.style.display = 'block'; };
-    inputs.forEach(inp => inp.addEventListener('change', onInputChange, { signal }));
-    inputs.forEach(inp => inp.addEventListener('input', onInputChange, { signal }));
+    for (const type of ['change', 'input']) inputs.forEach(inp => inp.addEventListener(type, onInputChange, { signal }));
     settingsListenersAttached = true;
    }
   }
+
+  // ===== 配置导入导出 =====
+  const BACKUP_KEYS = [STORAGE.ENABLE_NOTION, STORAGE.TOKEN, STORAGE.DB_ID, STORAGE.TAGS_PROP, STORAGE.FS_APP_ID, STORAGE.FS_APP_SECRET, STORAGE.FS_FOLDER, STORAGE.ENABLE_OBSIDIAN, STORAGE.OBSIDIAN_API_URL, STORAGE.OBSIDIAN_API_KEY, STORAGE.OBSIDIAN_FOLDER, STORAGE.BLOCKLIST, STORAGE.DOMAIN_TAGS, STORAGE.SEND_PROFILE];
+  // 设置表单文本字段清单：「打开回填(snap) / 保存落盘(save 可选转换，默认 trim) / 导入回填(imp 可选转换)」
+  const FORM_FIELDS = [
+   { key: STORAGE.TOKEN, input: el.tok, snap: 'notionToken' },
+   { key: STORAGE.DB_ID, input: el.db, snap: 'notionDbId', save: parseDbId },
+   { key: STORAGE.TAGS_PROP, input: el.tag, snap: 'notionTagsProp', imp: (v) => String(v ?? '') || 'Tags' },
+   { key: STORAGE.FS_APP_ID, input: el.fsAppId, snap: 'fsAppId' },
+   { key: STORAGE.FS_APP_SECRET, input: el.fsSecret, snap: 'fsAppSecret' },
+   { key: STORAGE.FS_FOLDER, input: el.fsFolder, snap: 'fsFolder' },
+   { key: STORAGE.OBSIDIAN_API_URL, input: el.obsApiUrl, snap: 'obsApiUrl', imp: (v) => String(v ?? '') || 'http://127.0.0.1:27123' },
+   { key: STORAGE.OBSIDIAN_API_KEY, input: el.obsApiKey, snap: 'obsApiKey' },
+   { key: STORAGE.OBSIDIAN_FOLDER, input: el.obsFolder, snap: 'obsFolder' },
+   { key: STORAGE.BLOCKLIST, input: el.blocklist, snap: 'blocklist' },
+   { key: STORAGE.DOMAIN_TAGS, input: el.domainTags, snap: 'domainTags' },
+  ];
+  const toBool = (v) => v === true || v === 'true';
+  el.expBtn.addEventListener('click', () => {
+   if (settingsDirty && !confirm('当前有未保存的表单修改，导出内容不包含这些修改。\n仍要继续导出？')) return;
+   const hasSecret = !!(GM_getValue(STORAGE.TOKEN, '') || GM_getValue(STORAGE.FS_APP_SECRET, '') || GM_getValue(STORAGE.OBSIDIAN_API_KEY, ''));
+   if (hasSecret && !confirm('导出文件将包含 Token / Secret 明文，请确认保存位置安全。\n继续导出？')) return;
+   const settings = {};
+   for (const k of BACKUP_KEYS) settings[k] = GM_getValue(k, '');
+   const payload = { app: 'notion-feishu-obsidian-clipper', version: SCRIPT_VERSION, exportedAt: new Date().toISOString(), settings };
+   const a = document.createElement('a');
+   a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+   a.download = 'clipper-config.json';
+   document.body.appendChild(a); a.click(); a.remove();
+   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+   toast('✅ 配置已导出为 clipper-config.json', 'success');
+  }, { signal });
+  el.impBtn.addEventListener('click', () => el.impFile.click(), { signal });
+  el.impFile.addEventListener('change', async () => {
+   const file = el.impFile.files && el.impFile.files[0];
+   el.impFile.value = '';
+   if (!file) return;
+   if (file.size > 1024 * 1024) { toast('❌ 导入失败：文件超过 1MB，不是有效的配置文件', 'error'); return; }
+   try {
+    const data = JSON.parse(await file.text());
+    const inc = (data && typeof data === 'object' && data.settings && typeof data.settings === 'object') ? data.settings : data;
+    if (!inc || typeof inc !== 'object' || Array.isArray(inc)) throw new Error('文件缺少 settings 字段');
+    const get = (k) => (inc[k] === undefined || inc[k] === null) ? '' : inc[k];
+    for (const f of FORM_FIELDS) f.input.value = f.imp ? f.imp(get(f.key)) : String(get(f.key));
+    el.ckNotion.checked = toBool(get(STORAGE.ENABLE_NOTION));
+    el.ckFeishu.checked = toBool(get(STORAGE.ENABLE_FEISHU));
+    el.ckObsidian.checked = toBool(get(STORAGE.ENABLE_OBSIDIAN));
+    el.sendProfile.value = get(STORAGE.SEND_PROFILE) === 'standard' ? 'standard' : 'gentle';
+    settingsDirty = true;
+    if (el.dirtyFlag) el.dirtyFlag.style.display = 'block';
+    toast('✅ 已回填导入配置，请核对后点击「保存设置」生效（Obsidian API 地址：' + el.obsApiUrl.value + '）', 'success');
+   } catch (e) {
+    toast('❌ 导入失败：' + (e?.message === '文件缺少 settings 字段' ? e.message : '文件不是有效的配置 JSON'), 'error');
+   }
+  }, { signal });
+  el.histClear.addEventListener('click', () => {
+   if (!confirm('确定清空全部发送历史？')) return;
+   GM_setValue(STORAGE.HISTORY, '[]');
+   renderSendHistory();
+   toast('已清空发送历史', 'success');
+  }, { signal });
+
+  // 覆盖层可见性判定——弹窗激活时不开启全新剪藏，防草稿 / 重试上下文被静默清空。
+  // 快捷键与悬浮球点击共用同一套守卫：此前只有快捷键有，面板打开时点悬浮球会进入
+  // 「选取模式已激活 + 确认面板仍显示」的叠加态。
+  const ovVisible = (ov) => ov.style.display === 'flex';
+  const startPickFlow = () => {
+   if (ovVisible(el.ovErr) || ovVisible(el.ovOk) || ovVisible(el.ovSet)) return;
+   if (ovVisible(el.ovCfm)) { appendMode = true; closeConfirm(); startSelect(); toast('追加模式：选取内容将并入当前剪藏', 'info'); }
+   else triggerClipper();
+  };
   function triggerClipper() {
-   if (selecting) stopSelect(); // v5.7.1：未配置提前 return 前先复位选取态，避免 mask/十字光标残留
-   refreshSettings(); // v5.2.0：单次快照，替代原先 5~6 次 readSettings 的存储风暴
+   if (selecting) stopSelect();
+   refreshSettings();
    cachedIcon = null;
-   imgDL = new Map(); imgDLBytes = 0; imgFailTs.clear(); // v5.5.0：字节计数随缓存一并重置；v5.7.1：负缓存一并重置
+   imgDL = new Map(); imgDLBytes = 0; imgFailTs.clear();
    cachedSend = null;
-   appendMode = false; // v5.5.0：新一次剪藏退出追加模式
+   appendMode = false;
    const useNotion = isNotionEnabled() && isNotionConfigured();
    const useFeishu = isFeishuEnabled() && isFeishuConfigured();
    const useObsidian = isObsidianEnabled();
@@ -1874,25 +2265,31 @@
    startSelect();
   }
 
-  // ============================================================
-  // 底层请求
-  // ============================================================
+  // ===== 网络请求与安全复核 =====
   function gmRequest({ method, url, headers, data, timeout, responseType }) {
    return new Promise((resolve, reject) => {
+    // finalUrl 二次复核：缓解 302 重定向穿透与 DNS rebinding，对最终实际访问的 URL 再拦一道；
+    let rawIsPrivate = false;
+    try { rawIsPrivate = isPrivateURL(url); } catch (e) {   }
     GM_xmlhttpRequest({
      method, url,
      headers: headers || {},
      data: data ?? null,
      timeout: timeout || C.API_TIMEOUT,
      responseType: responseType || '',
-     onload: res => resolve(res),
+     // 原始目标本身即私网（如 Obsidian 本机 API）时豁免复核，否则会确定性拒绝合法请求；
+     onload: res => {
+      if (!rawIsPrivate && res.finalUrl) {
+       try { if (isPrivateURL(res.finalUrl)) { reject(Object.assign(new Error('finalUrl 命中私网，响应已丢弃'))); return; } } catch (e) {   }
+      }
+      resolve(res);
+     },
      onerror: () => reject(Object.assign(new Error('网络错误'), { network: true })),
-     ontimeout: () => reject(Object.assign(new Error('请求超时'), { network: true })),
+     ontimeout: () => reject(Object.assign(new Error('请求超时'), { network: true, isTimeout: true })),
     });
    });
   }
 
-  // Notion API：基于 withRetry 的统一退避（v5.2.0：令牌读快照 S）
   async function apiReqNotion(method, url, data) {
    return withRetry(async (attempt) => {
     const res = await gmRequest({
@@ -1911,26 +2308,31 @@
     err.status = res.status;
     err.retryAfter = parseInt(parseResponseHeader(res, 'Retry-After') || '0', 10) || 0;
     throw err;
-   }, { retries: C.API_RETRY, retryOn: isRetryableError });
+   }, { retries: C.API_RETRY, retryOn: (err) => (String(method).toUpperCase() === 'GET' || !err.isTimeout) && isRetryableError(err) });
   }
 
-  // ============================================================
-  // 飞书 API
-  // ============================================================
-  async function getFeishuToken(force) {
-   const now = Date.now();
-   if (!force && fsTokenCache.token && now < fsTokenCache.expiry) return fsTokenCache.token;
+  // ===== 飞书 API 与写入队列 =====
+  // 飞书 tenant_access_token 鉴权：生产路径（getFeishuToken，带缓存与提前续期）与连接测试路径
+  // （testFeishuConn，用表单值直连）原本各写一遍相同的请求与响应校验，收敛为具名函数。
+  // 注意：测试路径此前错误文案少了 statusText 兜底，统一后仅在「接口返回无 msg 字段」时可见差异。
+  async function fsAuthToken(appId, appSecret) {
    const res = await gmRequest({
     method: 'POST',
     url: 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    data: JSON.stringify({ app_id: S.fsAppId, app_secret: S.fsAppSecret }),
+    data: JSON.stringify({ app_id: appId, app_secret: appSecret }),
    });
    const json = tryParseJSON(res.responseText);
    if (json === null) throw new Error('飞书鉴权响应解析失败');
    if (res.status < 200 || res.status >= 300 || json.code !== 0)
     throw new Error(`飞书鉴权失败(${json.code ?? res.status}): ${json.msg || res.statusText || ''}`);
-   fsTokenCache = { token: json.tenant_access_token, expiry: now + (((json.expire | 0) || 7200) - 120) * 1000 };
+   return { token: json.tenant_access_token, expire: json.expire };
+  }
+  async function getFeishuToken(force) {
+   const now = Date.now();
+   if (!force && fsTokenCache.token && now < fsTokenCache.expiry) return fsTokenCache.token;
+   const { token, expire } = await fsAuthToken(S.fsAppId, S.fsAppSecret);
+   fsTokenCache = { token, expiry: now + (((expire | 0) || 7200) - 120) * 1000 };
    return fsTokenCache.token;
   }
   async function apiReqFeishu(method, url, data) {
@@ -1951,14 +2353,17 @@
     err.status = res.status; err.code = json.code;
     if (json.code === 99991661 || json.code === 99991663 || json.code === 99991664) err.auth = true;
     throw err;
-   }, { retries: C.API_RETRY, retryOn: (err) => err.auth || isRetryableError(err) || err.code === 99991400 || err.code === 99991401 });
+   }, { retries: C.API_RETRY, retryOn: (err) => {
+    if (err.auth) return true;
+    if (err.isTimeout && String(method).toUpperCase() !== 'GET') return false;
+    return isRetryableError(err) || err.code === 99991400 || err.code === 99991401;
+   } });
   }
 
-  // 飞书串行写入队列：保证顺序 & 速率限制
   let fsWriteChain = Promise.resolve();
   async function fsWrite(method, url, data) {
    const task = async () => {
-    const wait = getProfile().apiGapMs - (Date.now() - fsLastWrite); // v5.7.0：间隔由发送节奏档位控制
+    const wait = getProfile().apiGapMs - (Date.now() - fsLastWrite);
     if (wait > 0) await sleep(wait);
     fsLastWrite = Date.now();
     return apiReqFeishu(method, url, data);
@@ -1980,12 +2385,10 @@
     console.warn('[NC] 拒绝下载内网图片 URL');
     return null;
    }
-   // v5.7.1：负缓存——TTL 内失败的 URL 直接短路返回，不再重复下载
    if (imgFailTs.has(url)) {
     if (Date.now() - imgFailTs.get(url) < C.IMG_FAIL_TTL) return null;
     imgFailTs.delete(url);
    }
-   // LRU：命中则提升到最新
    if (imgDL.has(url)) {
     const cached = imgDL.get(url);
     imgDL.delete(url); imgDL.set(url, cached);
@@ -2002,12 +2405,17 @@
      return { buf, ct };
     }
     if (res.status === 429 || res.status >= 500) {
-     const e = new Error(`HTTP ${res.status}`); e.status = res.status; throw e;
+     const e = new Error(`HTTP ${res.status}`); e.status = res.status;
+     e.retryAfter = parseFloat(parseResponseHeader(res, 'retry-after') || '0') || 0;
+     throw e;
     }
     return null;
    }, { retries: C.IMG_DL_RETRY + 1, retryOn: isRetryableError });
-   if (!result) { imgFailTs.set(url, Date.now()); return null; } // v5.7.1：失败写入负缓存
-   // 写入 LRU 缓存（v5.5.0：条数与总字节双重上限——此前仅限条数，50×15MB 最坏可占 750MB）
+   if (!result) {
+    imgFailTs.set(url, Date.now());
+    while (imgFailTs.size > C.IMG_FAIL_MAX) imgFailTs.delete(imgFailTs.keys().next().value);
+    return null;
+   }
    const evictOldest = () => {
     const oldest = imgDL.keys().next().value;
     if (oldest === undefined) return false;
@@ -2015,17 +2423,17 @@
     imgDL.delete(oldest);
     return true;
    };
-   while (imgDL.size >= C.IMG_DL_CACHE_MAX && evictOldest()) { /* 逐出最旧 */ }
-   while (imgDL.size && imgDLBytes + result.buf.byteLength > C.IMG_DL_CACHE_BYTES && evictOldest()) { /* 字节超限逐出 */ }
+   while (imgDL.size >= C.IMG_DL_CACHE_MAX && evictOldest()) {   }
+   while (imgDL.size && imgDLBytes + result.buf.byteLength > C.IMG_DL_CACHE_BYTES && evictOldest()) {   }
    imgDL.set(url, result);
    imgDLBytes += result.buf.byteLength;
-   imgFailTs.delete(url); // v5.7.1：成功后清除负缓存
+   imgFailTs.delete(url);
    return result;
   }
 
   async function mapLimit(items, limit, fn) {
    const ret = new Array(items.length);
-   if (!items.length) return ret; // 空数组提前返回，避免创建空 worker 集的无意义开销
+   if (!items.length) return ret;
    let i = 0;
    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (i < items.length) { const idx = i++; ret[idx] = await fn(items[idx], idx); }
@@ -2034,122 +2442,49 @@
    return ret;
   }
   async function feishuUploadImage(info, blockId) {
-   // v5.5.0：去掉外层 withRetry——fsWrite→apiReqFeishu 内部已有 3 次退避重试，
-   // 双层叠加最坏 3×3=9 次尝试，持久性故障下徒增阻塞
-   const fd = new FormData();
-   fd.append('file_name', info.name);
-   fd.append('parent_type', 'docx_image');
-   fd.append('parent_node', blockId);
-   fd.append('size', String(info.size));
-   fd.append('file', info.blob, info.name);
-   const json = await fsWrite('POST', 'https://open.feishu.cn/open-apis/drive/v1/medias/upload_all', fd);
-   const token = json?.data?.file_token || null;
-   if (token) return token;
-   throw new Error('未返回 file_token');
-  }
-
-  // ============================================================
-  // 飞书块转换
-  // ============================================================
-  function richToFeishuElements(rt) {
-   const elements = [];
-   for (const item of rt || []) {
-    const text = item.text?.content || '';
-    if (!text) continue;
-    const style = {};
-    const a = item.annotations || {};
-    if (a.bold) style.bold = true;
-    if (a.italic) style.italic = true;
-    if (a.strikethrough) style.strikethrough = true;
-    if (a.underline) style.underline = true;
-    if (a.code) style.inline_code = true;
-    if (item.text?.link?.url) style.link = { url: item.text.link.url };
-    elements.push({ text_run: { content: text, text_element_style: Object.keys(style).length ? style : undefined } });
-   }
-   return elements;
-  }
-  function fsPushText(out, blockType, key, elements) {
-   if (!elements.some(e => (e.text_run?.content || '').trim())) return false;
-   out.push({ block_type: blockType, [key]: { elements } });
-   return true;
-  }
-  function fsLinkPara(text, url) {
-   return { block_type: FS_BLK.TEXT, text: { elements: [{ text_run: { content: text, text_element_style: url ? { link: { url } } : undefined } }] } };
-  }
-  /**
-   * v5.2.0：子弹/编号列表的子块不再拍平到同级——先在子上下文中构建，
-   * 由 fsInsertTree 依据父块 block_id 递归插入，保留层级；
-   * 子块含不可缩进类型（标题等）时保守回退拍平。
-   */
-  function blocksToFeishu(blocks, ctx, depth = 0) {
-   if (depth > C.FS_BLOCK_DEPTH_MAX) return;
-   for (const block of blocks) {
-    const type = block.type;
-    if (type === 'paragraph') {
-     fsPushText(ctx.out, FS_BLK.TEXT, 'text', richToFeishuElements(block.paragraph?.rich_text));
-    } else if (type.startsWith('heading_')) {
-     const level = Math.min(Math.max(parseInt(type.split('_')[1], 10) || 1, 1), 9);
-     const headingKey = `heading${level}`;
-     fsPushText(ctx.out, FS_BLK[`H${level}`] ?? FS_BLK.TEXT, headingKey, richToFeishuElements(block[type]?.rich_text));
-    } else if (type === 'bulleted_list_item' || type === 'numbered_list_item') {
-     const bullet = type === 'bulleted_list_item';
-     const pushed = fsPushText(ctx.out, bullet ? FS_BLK.BULLET : FS_BLK.ORDERED, bullet ? 'bullet' : 'ordered', richToFeishuElements(block[type]?.rich_text));
-     const kids = block[type]?.children;
-     if (Array.isArray(kids) && kids.length) {
-      const childCtx = { out: [], jobs: [], imgInfo: ctx.imgInfo, nest: [] };
-      blocksToFeishu(kids, childCtx, depth + 1);
-      const nestable = pushed && childCtx.out.length > 0 && childCtx.out.every(b => FS_NESTABLE.has(b.block_type));
-      if (nestable) {
-       ctx.nest.push({ index: ctx.out.length - 1, ctx: childCtx });
-      } else {
-       // 拍平：子块提升至当前层级（图片任务与嵌套任务随迁并修正索引）
-       const offset = ctx.out.length;
-       ctx.out.push(...childCtx.out);
-       for (const j of childCtx.jobs) ctx.jobs.push({ index: offset + j.index, info: j.info });
-       for (const nj of childCtx.nest) ctx.nest.push({ index: offset + nj.index, ctx: nj.ctx });
-      }
-     }
-    } else if (type === 'quote') {
-     fsPushText(ctx.out, FS_BLK.QUOTE, 'quote', richToFeishuElements(block.quote?.rich_text));
-    } else if (type === 'code') {
-     const els = richToFeishuElements(block.code?.rich_text);
-     if (els.length) {
-      const lang = (block.code?.language || 'plain text').toLowerCase();
-      ctx.out.push({ block_type: FS_BLK.CODE, code: { elements: els, style: { language: FEISHU_LANG_MAP[lang] || 1 } } });
-     }
-    } else if (type === 'image') {
-     const url = block.image?.external?.url || '';
-     const info = url ? ctx.imgInfo?.get(url) : null;
-     if (info) { ctx.jobs.push({ index: ctx.out.length, info }); ctx.out.push({ block_type: FS_BLK.IMAGE, image: {} }); }
-     else if (url && !DATA_IMG_RE.test(url)) ctx.out.push(fsLinkPara(`🖼️ 图片: ${url}`, url));
-     else if (url) ctx.out.push({ block_type: FS_BLK.TEXT, text: { elements: [{ text_run: { content: '🖼️ [内嵌图片过大或格式不支持，已略过]' } }] } });
-    } else if (type === 'video' || type === 'embed') {
-     const url = block[type]?.external?.url || block[type]?.url || '';
-     if (url) ctx.out.push(fsLinkPara(`🔗 媒体: ${url}`, url));
-    } else if (type === 'table') {
-     for (const row of block.table?.children || []) {
-      const cells = row.table_row?.cells || [];
-      const text = cells.map(cellText).join(' | ');
-      if (text.trim()) ctx.out.push({ block_type: FS_BLK.TEXT, text: { elements: [{ text_run: { content: text } }] } });
-     }
-    } else if (type === 'divider') {
-     ctx.out.push({ block_type: FS_BLK.DIVIDER, divider: {} });
-    } else if (type === 'toggle') {
-     // 飞书块 API 无 toggle 类型，子块拍平为同级
-     fsPushText(ctx.out, FS_BLK.TEXT, 'text', richToFeishuElements(block.toggle?.rich_text));
-     const kids = block.toggle?.children;
-     if (Array.isArray(kids) && kids.length) blocksToFeishu(kids, ctx, depth + 1);
+   const attempt = async () => {
+    const fd = new FormData();
+    fd.append('file_name', info.name);
+    fd.append('parent_type', 'docx_image');
+    fd.append('parent_node', blockId);
+    fd.append('size', String(info.size));
+    fd.append('file', info.blob, info.name);
+    const json = await fsWrite('POST', 'https://open.feishu.cn/open-apis/drive/v1/medias/upload_all', fd);
+    const token = json?.data?.file_token || null;
+    if (!token) throw new Error('未返回 file_token');
+    return token;
+   };
+   let lastErr = null;
+   for (let i = 0; i <= C.FS_REL_RETRY; i++) {
+    if (i > 0) {
+     console.warn(`[NC] 飞书图片素材关联校验未就绪（1770013），${C.FS_REL_RETRY_WAIT * i}ms 后第 ${i}/${C.FS_REL_RETRY} 次重试上传`);
+     await sleep(C.FS_REL_RETRY_WAIT * i);
     }
+    try { return await attempt(); } catch (e) { if (e.code !== 1770013) throw e; lastErr = e; }
    }
+   throw lastErr;
   }
 
   /**
-   * v5.2.0 新增：递归插入块树。
-   * - 根级与子级统一走 /blocks/{parentBlockId}/children；
-   * - 嵌套任务在父块创建成功后以其 block_id 递归插入，失败自动降级为根级追加（内容不丢）；
-   * - 图片上传/回退均以“父块局部索引”定位，互不干扰。
+   * 递归插入块树：根级与子级统一走 /blocks/{parentBlockId}/children；
+   * 嵌套任务在父块创建成功后以其 block_id 递归插入，失败自动降级为根级追加（内容不丢）；
+   * 图片上传/回退均以父块局部索引定位，互不干扰。
    */
-  async function fsInsertTree(docId, ctx, parentBlockId, onProgress, state) {
+  // 与 notionCountChildren 同用途：飞书侧失败时读回文档根级子块数，校正断点续传的批次边界。
+  // 仅在根级（parentBlockId === docId）对账——嵌套层的批次索引不参与续传。
+  async function fsCountChildren(docId, blockId) {
+   let total = 0, token = null;
+   for (let guard = 0; guard < 100; guard++) {
+    const url = `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children?page_size=500` + (token ? `&page_token=${encodeURIComponent(token)}` : '');
+    const res = await fsWrite('GET', url);
+    const items = Array.isArray(res?.data?.items) ? res.data.items : [];
+    total += items.length;
+    if (!res?.data?.has_more || !res?.data?.page_token) break;
+    token = res.data.page_token;
+   }
+   return total;
+  }
+  async function fsInsertTree(docId, ctx, parentBlockId, onProgress, state, tokenByUrl = new Map(), startBatch = 0) {
    const batches = []; let cur = [], curImg = 0, curStart = 0;
    ctx.out.forEach((b, i) => {
     const isImg = b.block_type === FS_BLK.IMAGE;
@@ -2159,10 +2494,31 @@
    if (cur.length) batches.push({ blocks: cur, start: curStart });
    const failed = [];
    let imgFails = 0;
-   for (let bi = 0; bi < batches.length; bi++) {
+   let rootDegradeAppended = 0; // 嵌套降级为根级追加的块数——不经 batches 计划，断点对账时须扣除
+   const batchDenom = Math.max(batches.length, 1);
+   for (let bi = startBatch; bi < batches.length; bi++) {
     const batch = batches[bi];
-    if (onProgress && parentBlockId === docId) onProgress(10 + Math.round(bi / Math.max(batches.length, 1) * 60), `飞书块 ${batch.start + 1}/${ctx.out.length}`);
-    const res = await fsWrite('POST', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${parentBlockId}/children`, { children: batch.blocks });
+    if (onProgress && parentBlockId === docId) onProgress(10 + Math.round(bi / batchDenom * 60), `飞书块 ${batch.start + 1}/${ctx.out.length}`);
+    let res;
+    try {
+     res = await fsWrite('POST', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${parentBlockId}/children`, { children: batch.blocks });
+    } catch (e) {
+     let done = bi;
+     if (parentBlockId === docId) {
+      try {
+       const written0 = await fsCountChildren(docId, docId);
+       const written = Math.max(0, written0 - rootDegradeAppended); // 扣除嵌套降级块，否则边界前移导致重试丢块
+       let k = startBatch;
+       for (; k < batches.length; k++) {
+        const b = batches[k];
+        if (written >= b.start + b.blocks.length) continue;
+        break;
+       }
+       done = k;
+      } catch (e2) { console.warn('[NC] 飞书子块数读回失败，退回按批次起点续传:', e2?.message || e2); }
+     }
+     e.doneBatches = done; e.totalBatches = batches.length; throw e;
+    }
     if (state) state.appendedAny = true;
     const created = res?.data?.children || [];
     for (const job of ctx.jobs) {
@@ -2172,9 +2528,24 @@
      const blockId = created[local]?.block_id;
      if (!blockId) { failed.push({ index: job.index, info: job.info }); continue; }
      try {
-      if (onProgress) onProgress(70 + Math.round(bi / Math.max(batches.length, 1) * 15), `上传图片…`);
-      const fileToken = await feishuUploadImage(job.info, blockId);
-      await fsWrite('PATCH', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`, { replace_image: { token: fileToken } });
+      if (onProgress) onProgress(70 + Math.round(bi / batchDenom * 15), `上传图片…`);
+      let bound = false;
+      const cached = tokenByUrl.get(job.info.url);
+      if (cached) {
+       try {
+        await fsWrite('PATCH', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`, { replace_image: { token: cached } });
+        bound = true;
+       } catch (e) {
+        if (e.code !== 1770013) throw e;
+        if (tokenByUrl.get(job.info.url) === cached) tokenByUrl.delete(job.info.url);
+        console.warn('[NC] 飞书图片素材跨块复用被拒（1770013），改为当前块独立上传:', job.info.name);
+       }
+      }
+      if (!bound) {
+       const fileToken = await feishuUploadImage(job.info, blockId);
+       tokenByUrl.set(job.info.url, fileToken);
+       await fsWrite('PATCH', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`, { replace_image: { token: fileToken } });
+      }
      } catch (e) { console.error('[NC] 飞书图片上传失败:', e.message || '未知错误'); failed.push({ index: job.index, info: job.info, blockId }); }
     }
     for (const nj of ctx.nest) {
@@ -2183,17 +2554,23 @@
      const nestParent = created[local]?.block_id;
      if (!nestParent) continue;
      try {
-      const sub = await fsInsertTree(docId, nj.ctx, nestParent, null, state);
+      const sub = await fsInsertTree(docId, nj.ctx, nestParent, null, state, tokenByUrl);
       imgFails += sub.imgFails;
      } catch (e) {
-      // 嵌套插入失败 → 降级：挂到文档根级末尾，保证内容不丢
       console.warn('[NC] 嵌套插入失败，降级为根级追加:', e?.message || e);
-      const sub = await fsInsertTree(docId, nj.ctx, docId, null, state);
-      imgFails += sub.imgFails;
+      try {
+       const sub = await fsInsertTree(docId, nj.ctx, docId, null, state, tokenByUrl);
+       imgFails += sub.imgFails;
+       rootDegradeAppended += nj.ctx.out.length;
+      } catch (e2) {
+       // 降级也失败：剥离嵌套运行携带的 doneBatches（相对嵌套批次，误用于根级续传会丢块），
+       // 让外层按无断点处理（重试新建文档，不在旧文档上误续传）
+       if (e2 && typeof e2 === 'object') delete e2.doneBatches;
+       throw e2;
+      }
      }
     }
    }
-   // 失败图片回退为链接/占位（在当前父块范围内替换，索引互不干扰）
    for (const f of failed.sort((a, b) => b.index - a.index)) {
     if (!f.blockId) continue;
     try {
@@ -2207,74 +2584,18 @@
    return { imgFails };
   }
 
-  // ============================================================
-  // Obsidian Markdown 转换
-  // ============================================================
-  // v5.5.0：Markdown 行内链接/图片的 URL 转义——空格与圆括号会截断 () 语法定界
-  const mdUrl = (u) => String(u || '').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29');
-  function richToMd(rt) {
-   if (!rt) return '';
-   return rt.map(t => {
-    let text = t.text?.content || '';
-    if (!text) return '';
-    const a = t.annotations || {};
-    if (a.code) text = '`' + text + '`';
-    if (a.bold) text = '**' + text + '**';
-    if (a.italic) text = '*' + text + '*';
-    if (a.strikethrough) text = '~~' + text + '~~';
-    if (a.underline) text = '<u>' + text + '</u>';
-    if (t.text?.link?.url) text = `[${text}](${mdUrl(t.text.link.url)})`;
-    return text;
-   }).join('');
-  }
-  function blocksToMarkdown(blocks, indent = '') {
-   let md = '';
-   for (const b of blocks) {
-    const type = b.type;
-    if (type === 'paragraph') md += indent + richToMd(b.paragraph?.rich_text) + '\n\n';
-    else if (type.startsWith('heading_')) { const lv = parseInt(type.split('_')[1], 10) || 1; md += indent + '#'.repeat(lv) + ' ' + richToMd(b[type]?.rich_text) + '\n\n'; }
-    else if (type === 'bulleted_list_item') { md += indent + '- ' + richToMd(b[type]?.rich_text).replace(/\n/g, '\n  ') + '\n'; if (Array.isArray(b[type]?.children) && b[type].children.length) md += blocksToMarkdown(b[type].children, indent + '  '); }
-    else if (type === 'numbered_list_item') { md += indent + '1. ' + richToMd(b[type]?.rich_text).replace(/\n/g, '\n   ') + '\n'; if (Array.isArray(b[type]?.children) && b[type].children.length) md += blocksToMarkdown(b[type].children, indent + '   '); }
-    else if (type === 'quote') md += indent + '> ' + richToMd(b.quote?.rich_text).replace(/\n/g, '\n> ') + '\n\n';
-    else if (type === 'code') { const lang = b.code?.language || ''; md += indent + '```' + lang + '\n' + rtStr(b.code?.rich_text) + '\n```\n\n'; }
-    else if (type === 'image') { const url = b.image?.external?.url || ''; md += DATA_IMG_RE.test(url) ? indent + '🖼️ [内嵌图片(data:)，已略过]\n\n' : indent + `![](${mdUrl(url)})\n\n`; }
-    else if (type === 'video' || type === 'embed') { const url = b[type]?.external?.url || b[type]?.url || ''; md += indent + `[媒体链接](${mdUrl(url)})\n\n`; }
-    else if (type === 'table') {
-     // v5.2.0：单元格转义竖线，避免破坏 Markdown 表格结构
-     const mdCell = (cell) => cellText(cell).replace(/\|/g, '\\|');
-     const rows = b.table?.children || [];
-     if (rows.length > 0) {
-      const firstRow = rows[0].table_row?.cells || [];
-      md += indent + '| ' + firstRow.map(mdCell).join(' | ') + ' |\n';
-      md += indent + '| ' + firstRow.map(() => '---').join(' | ') + ' |\n';
-      for (let i = 1; i < rows.length; i++) { const cells = rows[i].table_row?.cells || []; md += indent + '| ' + cells.map(mdCell).join(' | ') + ' |\n'; }
-      md += '\n';
-     }
-    }
-    else if (type === 'divider') md += indent + '---\n\n';
-    else if (type === 'toggle') md += indent + '<details>\n' + indent + '<summary>' + rtStr(b.toggle?.rich_text) + '</summary>\n\n' + blocksToMarkdown(b.toggle?.children || [], indent) + '\n' + indent + '</details>\n\n';
-   }
-   return md;
-  }
-
-  // ============================================================
-  // Obsidian 串行写入队列
-  // ============================================================
+  // ===== Obsidian 发送 =====
   let obsWriteChain = Promise.resolve();
   const obsWrite = (task) => { obsWriteChain = obsWriteChain.then(task, task); return obsWriteChain; };
 
-  // v5.3.0：Obsidian 仅保留 Local REST API 模式；失败不再静默回退剪贴板，
-  // 而是抛错进入失败弹窗（弹窗内提供“复制 Markdown”与“重试”）。
-  const normalizeObsidianBase = (raw) => {
-   let b = String(raw || '').trim() || 'http://127.0.0.1:27123';
-   if (!/^https?:\/\//i.test(b)) b = 'http://' + b;
-   return b.replace(/\/+$/, '').replace(/\/vault$/i, '');
-  };
+  // 三处发送路径（Obsidian / Notion / 飞书）以同一规则定标题，收敛为具名函数；
+  // 复制路径与发送历史保持原样——它们对超长标题的处理语义不同，不参与收敛。
+  const resolveSendTitle = (t) => t || pageTitle() || 'Untitled';
+  const sendTitleOf = (t) => resolveSendTitle(t).substring(0, C.TITLE_MAX);
   function buildMarkdown(sendBlocks, sendTitle, sendTags) {
-   const title = (sendTitle || pageTitle() || 'Untitled').substring(0, C.TITLE_MAX);
+   const title = sendTitleOf(sendTitle);
    const tags = (sendTags || '').split(',').map(t => t.trim()).filter(Boolean);
-   // YAML front matter
-   const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' '); // v5.7.0：补反斜杠与换行转义，防止破坏 YAML front matter
+   const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ');
    let fm = '---\n';
    fm += `title: "${esc(title)}"\n`;
    fm += `source: "${safeURL(location.href) || ''}"\n`;
@@ -2287,41 +2608,44 @@
    if (onProgress) onProgress(10, '正在生成 Markdown…');
    const { md: mdContent, title } = buildMarkdown(sendBlocks, sendTitle, sendTags);
    if (onProgress) onProgress(45, '准备写入 Obsidian…');
-   const folder = String(S.obsFolder || '').trim().replace(/^\/+|\/+$/g, '');
-   const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').trim().substring(0, 120) || 'Untitled';
+   // 逐段校验：encodeURIComponent('..') 仍是 '..'，仅去首尾斜杠挡不住路径穿越
+   // （保存路径可经「导入配置」带入，属不可信输入）。合法性处理与 safeTitle 同款。
+   const folder = String(S.obsFolder || '').split(/[\\/]+/)
+    .map(s => s.trim())
+    .filter(s => s && s !== '.' && s !== '..')
+    .map(s => s.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i, '_$1'))
+    .slice(0, 8)
+    .join('/');
+   const safeTitle = (title.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().substring(0, 120).replace(/[\s.]+$/g, '').replace(/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i, '_$1')) || 'Untitled';
    const relPath = folder ? `${folder}/${safeTitle}.md` : `${safeTitle}.md`;
    const encodedPath = relPath.split('/').filter(Boolean).map(encodeURIComponent).join('/');
    const baseUrl = normalizeObsidianBase(S.obsApiUrl);
    const apiKey = String(S.obsApiKey || '').trim();
-   // 时间戳（同名已存在时换名另存用；用 - 代替 : 以兼容 Windows 文件名，毫秒保证唯一）
    const fileStamp = () => {
-    const d = new Date(), p = (n) => String(n).padStart(2, '0'), p3 = (n) => String(n).padStart(3, '0');
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}.${p3(d.getMilliseconds())}`;
+    const d = new Date(), p3 = (n) => String(n).padStart(3, '0');
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}.${p3(d.getMilliseconds())}`;
    };
 
-   // v5.3.2：Local REST API 对已存在文件 PUT 会抛 "File already exists"（内部走 Vault.create）
-   // 并被映射为 HTTP 500。策略为“永不覆盖”：探测目标已存在则换带时间戳的新文件名另存，旧文件保留不动。
    const ensureUniquePath = async () => {
     if (!apiKey) throw new Error('未配置 Obsidian API Key（可在失败弹窗中复制 Markdown）');
     let exists = false;
     try {
      const probe = await gmRequest({ method: 'GET', url: `${baseUrl}/vault/${encodedPath}`, headers: { 'Authorization': `Bearer ${apiKey}` }, timeout: 8000 });
      exists = probe.status === 200;
-    } catch { /* 探测失败：按不存在处理，继续尝试 PUT 原名 */ }
+    } catch {   }
     if (!exists) return encodedPath;
-    // 已存在 → 永不覆盖，另存为带时间戳（毫秒）的新文件
     const altRel = relPath.replace(/(\.md)$/i, ` ${fileStamp()}$1`);
     return altRel.split('/').filter(Boolean).map(encodeURIComponent).join('/');
    };
 
-   let lastTargetPath = null; // v5.7.1：重试幂等——上次尝试的路径若已存在，视为上次已写入成功，避免超时歧义下换时间戳名造成双份笔记
+   let lastTargetPath = null;
    const executeWrite = () => withRetry(async () => {
     if (!apiKey) throw new Error('未配置 Obsidian API Key（可在失败弹窗中复制 Markdown）');
     if (lastTargetPath) {
      try {
       const reprobe = await gmRequest({ method: 'GET', url: `${baseUrl}/vault/${lastTargetPath}`, headers: { 'Authorization': `Bearer ${apiKey}` }, timeout: 8000 });
-      if (reprobe.status === 200) return; // 上次 PUT 实际已成功（响应丢失），幂等完成
-     } catch { /* 探测失败 → 走正常重试 */ }
+      if (reprobe.status === 200) return;
+     } catch {   }
     }
     const targetPath = await ensureUniquePath();
     lastTargetPath = targetPath;
@@ -2347,36 +2671,93 @@
    return {};
   }
 
-  // ============================================================
-  // 发送：Notion
-  // ============================================================
+  // ===== Notion 发送 =====
+  // Notion 官方负载限制为「任意 block / rich_text 数组 ≤100 元素」且「单请求 ≤1000 块元素、
+  // 500KB」（developers.notion.com/reference/request-limits）。原实现只按顶层块 100 个切分，嵌套 children
+  // 不计入——嵌套内容多的页面单请求块元素总量可达数千，确定性 validation_error 400，且该阶段失败
+  // 不设断点、重试原样复现。改为按「顶层块数 + 嵌套总量 + 估算字节」三重阈值规划分块。
+  function notionBlockCount(b) {
+   let n = 1;
+   const body = b?.[b?.type];
+   if (body && Array.isArray(body.children)) for (const c of body.children) n += notionBlockCount(c);
+   return n;
+  }
+  function notionEstBytes(b) {
+   let bytes = 600; // 每块 JSON 结构固定开销粗估
+   const body = b?.[b?.type];
+   const rt = body?.rich_text;
+   if (Array.isArray(rt)) for (const t of rt) bytes += ((t?.text?.content || '').length + (t?.text?.link?.url || '').length) * 1.1 + 120;
+   const kids = body?.children;
+   if (Array.isArray(kids)) for (const c of kids) bytes += notionEstBytes(c);
+   return bytes;
+  }
+  function notionPlanChunks(blks, startIdx = 0) {
+   const ranges = [];
+   let s = startIdx, count = 0, bytes = 2048;
+   for (let i = startIdx; i < blks.length; i++) {
+    const w = notionBlockCount(blks[i]), wb = notionEstBytes(blks[i]);
+    if (i > s && (count + w > C.NOTION_REQ_BLOCKS_MAX || bytes + wb > C.NOTION_REQ_BYTES_MAX || i - s >= C.BATCH_SIZE)) {
+     ranges.push({ start: s, end: i }); s = i; count = 0; bytes = 2048;
+    }
+    count += w; bytes += wb;
+   }
+   if (s < blks.length) ranges.push({ start: s, end: blks.length });
+   return ranges;
+  }
+  // 断点续传对账：某一批可能因网络丢响应而「已落库但客户端判定失败」，此时若只按批次起点
+  // 记录进度，重试会把同一批原样再写一遍（目标页出现重复段落）。故失败时读回服务端实际子块数，
+  // 用真实边界校正续传进度；读回失败时退回原语义，不因对账阻断重试。
+  async function notionCountChildren(pageId) {
+   let total = 0, cursor = null;
+   for (let guard = 0; guard < 100; guard++) {
+    const url = `https://api.notion.com/v1/blocks/${pageId}/children?page_size=100` + (cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : '');
+    const res = await apiReqNotion('GET', url);
+    const arr = Array.isArray(res?.results) ? res.results : [];
+    total += arr.length;
+    if (!res?.has_more || !res.next_cursor) break;
+    cursor = res.next_cursor;
+   }
+   return total;
+  }
   async function appendChildren(pageId, blks, onProgress, base = 0) {
-   for (let i = 0; i < blks.length; i += C.BATCH_SIZE) {
+   const ranges = notionPlanChunks(blks, 0);
+   for (let ri = 0; ri < ranges.length; ri++) {
+    const { start, end } = ranges[ri];
     try {
-     await apiReqNotion('PATCH', `https://api.notion.com/v1/blocks/${pageId}/children`, { children: blks.slice(i, i + C.BATCH_SIZE) });
-     if (onProgress) onProgress(base + Math.min(i + C.BATCH_SIZE, blks.length), base + blks.length);
-    } catch (e) { e.sent = i; throw e; }
-    if (i + C.BATCH_SIZE < blks.length) await sleep(getProfile().apiGapMs); // v5.7.0：间隔由发送节奏档位控制
+     await apiReqNotion('PATCH', `https://api.notion.com/v1/blocks/${pageId}/children`, { children: blks.slice(start, end) });
+     if (onProgress) onProgress(base + end, base + blks.length);
+    } catch (e) {
+     let confirmed = start;
+     try {
+      const written = await notionCountChildren(pageId);
+      confirmed = Math.max(start, Math.min(end, written - base));
+     } catch (e2) { console.warn('[NC] Notion 子块数读回失败，退回按批次起点续传:', e2?.message || e2); }
+     e.sent = confirmed; throw e;
+    }
+    if (ri + 1 < ranges.length) await sleep(getProfile().apiGapMs);
    }
   }
-  /** v5.2.0：递归清洗——子块（列表/折叠块 children）内的 data: 图片同样替换为占位 */
   function notionSanitize(blks) {
-   const walk = (arr) => (arr || []).map(b => {
+   const sanitizeList = (arr) => (arr || []).map(b => {
     if (b && b.type === 'image' && DATA_IMG_RE.test(b.image?.external?.url || ''))
      return mkPara('🖼️ [页面内嵌图片(data:)，Notion 不支持，已略过]');
     const body = b?.[b.type];
-    if (body && Array.isArray(body.children)) body.children = walk(body.children);
+    if (body && Array.isArray(body.children)) body.children = sanitizeList(body.children);
     return b;
    });
-   return walk(blks);
+   return sanitizeList(blks);
   }
+  const NOTION_URL_PROPS = [
+   ['URL', () => safeURL(location.href)],
+   ['Content Image', () => safeURL(pageMainImage())],
+   ['Icon', () => safeURL(pageIcon())],
+  ];
   async function sendToNotion(rawBlocks, sendTitle, sendTags, resume, onProgress) {
-   const allBlocks = notionSanitize(rawBlocks);
+   const allBlocks = notionSanitize(structuredClone(rawBlocks));
    if (resume && resume.pageId) {
     lastNotionPageId = resume.pageId;
     const startIdx = resume.sent || 0;
     try {
-     // v5.2.0：断点续传进度以全量为基准，不再首拍即 100%
      await appendChildren(resume.pageId, allBlocks.slice(startIdx), (sent, total) => { if (onProgress) onProgress(10 + Math.round(sent / total * 85), `Notion 块 ${sent}/${total}`); }, startIdx);
     } catch (e) {
      const err = new Error('页面已存在，剩余内容追加失败: ' + (e.message || '未知'));
@@ -2386,12 +2767,11 @@
     return;
    }
    const dbId = parseDbId(S.notionDbId);
-   const title = sendTitle || pageTitle() || 'Untitled';
+   const title = sendTitleOf(sendTitle);
    const tags = (sendTags || '').split(',').map(t => t.trim()).filter(Boolean);
    const tagsProp = (S.notionTagsProp || 'Tags').trim();
    if (!dbId) throw new Error('Notion Database ID 格式不正确');
    if (onProgress) onProgress(5, '正在查询 Notion 数据库…');
-   // v5.2.0：数据库 schema 会话级缓存（含自动建标签属性后的增量更新），同页多次发送省一次 GET
    let props;
    if (notionDbCache.dbId === dbId && notionDbCache.props) props = notionDbCache.props;
    else {
@@ -2404,69 +2784,75 @@
    }
    let titleKey = 'Name';
    for (const k in props) if (props[k].type === 'title') { titleKey = k; break; }
-   const properties = { [titleKey]: { title: [{ text: { content: title.substring(0, C.TITLE_MAX) } }] } };
+   const properties = { [titleKey]: { title: [{ text: { content: title } }] } };
    if (tagsProp && tags.length && props[tagsProp]) {
     const t = props[tagsProp].type;
     if (t === 'select') properties[tagsProp] = { select: { name: tags[0].slice(0, C.TAG_NAME_MAX) } };
     else if (t === 'multi_select') properties[tagsProp] = { multi_select: tags.map(tg => ({ name: tg.slice(0, C.TAG_NAME_MAX) })) };
    }
-   for (const [key, getter] of Object.entries({ 'URL': () => safeURL(location.href), 'Content Image': () => safeURL(pageMainImage()), Icon: () => safeURL(pageIcon()) })) {
+   for (const [key, getter] of NOTION_URL_PROPS) {
     if (props[key]?.type === 'url') { const val = getter(); if (val) properties[key] = { url: val }; }
    }
-   const firstBatch = allBlocks.slice(0, C.BATCH_SIZE);
+   const firstRange = notionPlanChunks(allBlocks, 0)[0];
+   const firstBatch = firstRange ? allBlocks.slice(firstRange.start, firstRange.end) : [];
    const payload = { parent: { database_id: dbId }, properties, children: firstBatch };
    const iconUrl = safeURL(pageIcon());
-   if (iconUrl && !/\.svg($|\?)/i.test(iconUrl)) payload.icon = { type: 'external', external: { url: iconUrl } }; // v5.7.1：跳过 SVG 图标（部分版本不接受，防整页创建失败；图标缺失不影响正文）
+   if (iconUrl && !/\.svg($|\?)/i.test(iconUrl)) payload.icon = { type: 'external', external: { url: iconUrl } };
    if (onProgress) onProgress(10, '正在创建 Notion 页面…');
    const resp = await apiReqNotion('POST', 'https://api.notion.com/v1/pages', payload);
    lastNotionPageId = resp.id;
-   if (allBlocks.length > C.BATCH_SIZE) {
+   if (firstRange && firstRange.end < allBlocks.length) {
     try {
-     await appendChildren(resp.id, allBlocks.slice(C.BATCH_SIZE), (sent, total) => { if (onProgress) onProgress(10 + Math.round(sent / total * 85), `Notion 块 ${sent}/${total}`); }, C.BATCH_SIZE);
+     await appendChildren(resp.id, allBlocks.slice(firstRange.end), (sent, total) => { if (onProgress) onProgress(10 + Math.round(sent / total * 85), `Notion 块 ${sent}/${total}`); }, firstRange.end);
      if (onProgress) onProgress(95, 'Notion 完成');
     } catch (e) {
      const err = new Error('页面已创建，但部分内容追加失败: ' + (e.message || '未知'));
-     err.resume = { pageId: resp.id, sent: C.BATCH_SIZE + (e.sent || 0) };
+     err.resume = { pageId: resp.id, sent: firstRange.end + (e.sent || 0) };
      throw err;
     }
    }
   }
 
-  // ============================================================
-  // 发送：飞书
-  // ============================================================
-  async function sendToFeishu(sendBlocks, sendTitle, onProgress) {
+  // ===== 飞书发送 =====
+  async function sendToFeishu(sendBlocks, sendTitle, onProgress, resume) {
    const folderToken = String(S.fsFolder || '').trim();
-   const title = (sendTitle || pageTitle() || 'Untitled').substring(0, C.TITLE_MAX);
-   if (onProgress) onProgress(0, '正在创建飞书文档…');
-   const createRes = await fsWrite('POST', 'https://open.feishu.cn/open-apis/docx/v1/documents', folderToken ? { title, folder_token: folderToken } : { title });
-   const docId = createRes?.data?.document?.document_id;
-   if (!docId) throw new Error('创建飞书文档失败：未获取到 document_id');
-   lastFeishuDocId = docId;
-   // 等待文档初始化就绪
-   let docReady = false;
-   for (let i = 0; i <= C.FS_INIT_RETRY; i++) {
-    await sleep(C.FS_INIT_WAIT);
-    try { const check = await fsWrite('GET', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}`); if (check?.data?.document?.document_id) { docReady = true; break; } } catch { /* 文档尚未就绪，重试 */ }
+   const title = sendTitleOf(sendTitle);
+   const canResume = !!(resume && typeof resume.docId === 'string' && resume.docId && Number.isInteger(resume.done) && resume.done >= 0);
+   const startBatch = canResume ? resume.done : 0;
+   let docId;
+   if (canResume) {
+    docId = resume.docId;
+    lastFeishuDocId = docId;
+    if (onProgress) onProgress(8, `飞书：复用已建文档，从第 ${startBatch + 1} 批继续…`);
+   } else {
+    if (onProgress) onProgress(0, '正在创建飞书文档…');
+    const createRes = await fsWrite('POST', 'https://open.feishu.cn/open-apis/docx/v1/documents', folderToken ? { title, folder_token: folderToken } : { title });
+    docId = createRes?.data?.document?.document_id;
+    if (!docId) throw new Error('创建飞书文档失败：未获取到 document_id');
+    lastFeishuDocId = docId;
+    let docReady = false;
+    for (let i = 0; i <= C.FS_INIT_RETRY; i++) {
+     await sleep(C.FS_INIT_WAIT);
+     try { const check = await fsWrite('GET', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}`); if (check?.data?.document?.document_id) { docReady = true; break; } } catch {   }
+    }
+    if (!docReady) throw new Error('飞书文档初始化超时，请重试');
    }
-   if (!docReady) throw new Error('飞书文档初始化超时，请重试');
-   // v5.2.0：递归收集图片 URL（含列表/折叠块子块中的图片），不再只扫顶层
    const imgSet = new Set();
-   (function collectImgs(arr) {
+   function collectImgUrls(arr) {
     for (const b of arr) {
      if (!b) continue;
      if (b.type === 'image') { const u = b.image?.external?.url; if (u) imgSet.add(u); }
      const body = b[b.type];
-     if (body && Array.isArray(body.children)) collectImgs(body.children);
+     if (body && Array.isArray(body.children)) collectImgUrls(body.children);
     }
-   })(sendBlocks);
-   // v5.3.3：去掉图片数量上限——全部图片下载并上传；上传走 fsWrite 串行限流队列，分批不触发飞书 API 限流
+   }
+   collectImgUrls(sendBlocks);
    const imgUrls = [...imgSet];
-   if (imgUrls.length > 30) toast(`共 ${imgUrls.length} 张图片，将全部上传（较多时耗时较长）`, 'info');
+   if (imgUrls.length > C.FS_IMG_WARN) toast(`共 ${imgUrls.length} 张图片，将全部上传（较多时耗时较长）`, 'info');
    const imgInfo = new Map();
    if (imgUrls.length) {
     if (onProgress) onProgress(5, `飞书：正在下载 ${imgUrls.length} 张图片…`);
-    const infos = await mapLimit(imgUrls, getProfile().imgConc, async (url, i) => { // v5.7.0：下载并发由发送节奏档位控制（温和=2 / 标准=3）
+    const infos = await mapLimit(imgUrls, getProfile().imgConc, async (url, i) => {
      try {
       const bin = await fetchImage(url);
       if (!bin) return null;
@@ -2487,13 +2873,15 @@
    const state = { appendedAny: false };
    let imgFails = 0;
    try {
-    const res = await fsInsertTree(docId, ctx, docId, onProgress, state);
+    const res = await fsInsertTree(docId, ctx, docId, onProgress, state, new Map(), startBatch);
     imgFails = res.imgFails;
    } catch (e) {
-    // v5.2.0：整体失败且未写入任何内容 → 尽力移入回收站，避免云空间残留空文档
-    if (!state.appendedAny) {
+    if (!state.appendedAny && !canResume) {
      try { await fsWrite('POST', `https://open.feishu.cn/open-apis/drive/v1/files/${docId}/trash?type=docx`, {}); lastFeishuDocId = null; }
      catch (e2) { console.warn('[NC] 空文档回收站清理失败:', e2?.message || e2); }
+    } else if (typeof e.doneBatches === 'number' && e.doneBatches >= 0) {
+     e.resume = { docId, done: e.doneBatches };
+     e.message = `文档已创建但部分内容追加失败（已完成 ${e.doneBatches}/${e.totalBatches || '?'} 批，重试将从断点续传）: ${(e.message || '未知').substring(0, 120)}`;
     }
     throw e;
    }
@@ -2501,11 +2889,9 @@
    return { docId, imgFails };
   }
 
-  // ============================================================
-  // 发送调度
-  // ============================================================
-  async function sendToAll(sendBlocks, sendTitle, sendTags, onlyPlatforms, notionResume) {
-   refreshSettings(); // v5.2.0：发送前刷新一次快照，全程复用
+  // ===== 发送编排 =====
+  async function sendToAll(sendBlocks, sendTitle, sendTags, onlyPlatforms, notionResume, feishuResume) {
+   refreshSettings();
    el.send.disabled = true; el.send.textContent = '发送中...'; showProgress();
    const useNotion = isNotionEnabled() && isNotionConfigured();
    const useFeishu = isFeishuEnabled() && isFeishuConfigured();
@@ -2514,84 +2900,95 @@
    const shouldFeishu = useFeishu && (!onlyPlatforms || onlyPlatforms.includes('feishu'));
    const shouldObsidian = useObsidian && (!onlyPlatforms || onlyPlatforms.includes('obsidian'));
    let notionOk = false, feishuOk = false, obsidianOk = false;
-   let errors = [], failedPlatforms = [], successPlatforms = [], nextNotionResume = null;
+   let errors = [], failedPlatforms = [], successPlatforms = [], nextNotionResume = null, nextFeishuResume = null;
 
-   // 按启用顺序分配进度区间
    const active = [];
    if (shouldNotion) active.push('notion');
    if (shouldFeishu) active.push('feishu');
    if (shouldObsidian) active.push('obsidian');
    const weight = active.length > 0 ? 100 / active.length : 100;
 
-   // v5.5.0：进度改为「各平台百分比加权求和」——此前直接叠加绝对刻度，
-   // 多平台进度不同步时进度条会来回跳动；聚合后单调递增
    const progMap = { notion: 0, feishu: 0, obsidian: 0 };
    const mkProgress = (name) => (pct, txt) => {
     progMap[name] = Math.max(progMap[name], Math.min(Math.max(pct | 0, 0), 100));
     const total = active.reduce((s, n) => s + progMap[n], 0);
-    updateProgress(total * weight / 100, txt ? `${name} · ${txt}` : undefined); // v5.7.1：文本带平台前缀，多平台并发时语义不再互相覆盖
+    updateProgress(total * weight / 100, txt ? `${PLATFORM_LABELS[name] || name} · ${txt}` : undefined);
    };
 
-   // v5.4.0：统一平台失败记录逻辑，消除三处重复的 errors/failedPlatforms 拼接
    const fail = (name, key, err) => { errors.push(`${name}: ${(err?.message || '未知').substring(0, 200)}`); failedPlatforms.push(key); };
 
-   // v5.7.0：平台错峰启动——按启用顺序依次延迟 staggerMs 再发起，峰值并发连接从「全并行」
-   // 降至约 1~2，降低对目标 API 的瞬时压力，也避免多平台同时失败后同步重试形成惊群
    const promises = [];
    const staggerMs = getProfile().staggerMs;
    let platSeq = 0;
-   if (shouldNotion) { const delay = (platSeq++) * staggerMs; promises.push(sleep(delay).then(() => sendToNotion(sendBlocks, sendTitle, sendTags, notionResume || null, mkProgress('notion'))).then(() => { notionOk = true; successPlatforms.push('Notion'); }).catch(err => { if (err?.resume) nextNotionResume = err.resume; fail('Notion', 'notion', err); })); }
-   if (shouldFeishu) { const delay = (platSeq++) * staggerMs; promises.push(sleep(delay).then(() => sendToFeishu(sendBlocks, sendTitle, mkProgress('feishu'))).then(({ docId, imgFails }) => { feishuOk = true; lastFeishuDocId = docId; successPlatforms.push(imgFails ? `飞书（${imgFails} 张图片回退）` : '飞书'); }).catch(err => fail('飞书', 'feishu', err))); }
-   if (shouldObsidian) { const delay = (platSeq++) * staggerMs; promises.push(sleep(delay).then(() => sendToObsidian(sendBlocks, sendTitle, sendTags, mkProgress('obsidian'))).then(() => { obsidianOk = true; successPlatforms.push('Obsidian'); }).catch(err => fail('Obsidian', 'obsidian', err))); }
+   // 错峰红线：platSeq 依启用顺序自增 × staggerMs（Notion→飞书→Obsidian，仅计启用平台），该语义不可变。
+   const platformJobs = [
+    { enabled: shouldNotion, run: () => sendToNotion(sendBlocks, sendTitle, sendTags, notionResume || null, mkProgress('notion')), onSuccess: () => { notionOk = true; successPlatforms.push(PLATFORM_LABELS.notion); }, onFail: (err) => { if (err?.resume) nextNotionResume = err.resume; fail(PLATFORM_LABELS.notion, 'notion', err); } },
+    { enabled: shouldFeishu, run: () => sendToFeishu(sendBlocks, sendTitle, mkProgress('feishu'), feishuResume || null), onSuccess: ({ docId, imgFails }) => { feishuOk = true; lastFeishuDocId = docId; successPlatforms.push(imgFails ? `${PLATFORM_LABELS.feishu}（${imgFails} 张图片回退）` : PLATFORM_LABELS.feishu); }, onFail: (err) => { if (err?.resume) nextFeishuResume = err.resume; fail(PLATFORM_LABELS.feishu, 'feishu', err); } },
+    { enabled: shouldObsidian, run: () => sendToObsidian(sendBlocks, sendTitle, sendTags, mkProgress('obsidian')), onSuccess: () => { obsidianOk = true; successPlatforms.push(PLATFORM_LABELS.obsidian); }, onFail: (err) => fail(PLATFORM_LABELS.obsidian, 'obsidian', err) },
+   ];
+   for (const job of platformJobs) {
+    if (!job.enabled) continue;
+    const delay = (platSeq++) * staggerMs;
+    promises.push(sleep(delay).then(job.run).then(job.onSuccess).catch(job.onFail));
+   }
 
    if (!promises.length) { el.send.disabled = false; el.send.textContent = '发送'; hideProgress(); toast('没有可发送的平台', 'error'); return; }
-   sending = true; // v5.5.0：配合 beforeunload，发送期间拦截页面关闭
-   await Promise.all(promises);
-   sending = false;
-   el.send.disabled = false; el.send.textContent = '发送'; hideProgress();
+   // 复位必须走 finally：此前复位语句在直线路径上，一旦中途抛错就会留下
+   // 「sending 恒 true（beforeunload 永久拦截离页）+ 发送按钮恒 disabled」的卡死态。
+   try {
+    sending = true;
+    await Promise.all(promises);
 
-   // v5.5.0：合并历史成功平台——重试只补发失败项，此前的成功不能在提示中消失
-   const allSuccess = accSuccess.concat(successPlatforms);
-   accSuccess = allSuccess;
+    const allSuccess = accSuccess.concat(successPlatforms);
+    accSuccess = allSuccess;
+    if (allSuccess.length > 0) recordSendHistory(sendTitle, allSuccess);
 
-   if (errors.length > 0) {
-    cachedSend = { blocks: sendBlocks, title: sendTitle, tags: sendTags, failedPlatforms, notionResume: nextNotionResume };
-    closeConfirm();
-    if (allSuccess.length > 0) { el.errTitle.textContent = '⚠️ 部分发送失败'; el.errTitle.style.color = '#e65100'; el.errSucc.textContent = `✅ 已成功: ${allSuccess.join(', ')}`; el.errSucc.style.display = ''; }
-    else { el.errTitle.textContent = '❌ 发送失败'; el.errTitle.style.color = '#d32f2f'; el.errSucc.style.display = 'none'; }
-    el.errDetail.textContent = errors.join('\n\n'); el.errMd.style.display = failedPlatforms.length ? '' : 'none'; el.ovErr.style.display = 'flex'; // v5.7.1：复制 Markdown 扩展至任意平台失败（buildMarkdown 不依赖任何平台）
-   } else {
-    cachedSend = null; closeConfirm(); el.ovOk.style.display = 'flex';
-    el.okOpenNotion.style.display = (notionOk || allSuccess.includes('Notion')) ? '' : 'none';
-    el.okOpenFeishu.style.display = (feishuOk || allSuccess.some(s => s.startsWith('飞书'))) ? '' : 'none';
-    el.okOpenObsidian.style.display = (obsidianOk || allSuccess.includes('Obsidian')) ? '' : 'none';
-    el.okMsg.textContent = `已成功保存到 ${allSuccess.join(', ')}`;
-    clearTimeout(okAutoCloseTimer); okAutoCloseTimer = setTimeout(() => { el.ovOk.style.display = 'none'; }, 10000);
+    if (errors.length > 0) {
+     cachedSend = { blocks: sendBlocks, title: sendTitle, tags: sendTags, failedPlatforms, notionResume: nextNotionResume, feishuResume: nextFeishuResume };
+     closeConfirm();
+     // 走 class 而非内联色：内联色不随暗色主题切换，且 #e65100 在白底仅 3.79:1（不达 WCAG AA）
+     if (allSuccess.length > 0) { el.errTitle.textContent = '⚠️ 部分发送失败'; el.errTitle.classList.add('is-warn'); el.errSucc.textContent = `✅ 已成功: ${allSuccess.join(', ')}`; el.errSucc.style.display = ''; }
+     else { el.errTitle.textContent = '❌ 发送失败'; el.errTitle.classList.remove('is-warn'); el.errSucc.style.display = 'none'; }
+     el.errDetail.textContent = errors.join('\n\n'); el.errMd.style.display = failedPlatforms.length ? '' : 'none'; el.ovErr.style.display = 'flex';
+     el.retry.focus();
+    } else {
+     cachedSend = null; closeConfirm(); el.ovOk.style.display = 'flex';
+     el.okOpenNotion.style.display = (notionOk || allSuccess.includes('Notion')) ? '' : 'none';
+     el.okOpenFeishu.style.display = (feishuOk || allSuccess.some(s => s.startsWith('飞书'))) ? '' : 'none';
+     el.okOpenObsidian.style.display = (obsidianOk || allSuccess.includes('Obsidian')) ? '' : 'none';
+     el.okMsg.textContent = `已成功保存到 ${allSuccess.join(', ')}`;
+     clearTimeout(okAutoCloseTimer); okAutoCloseTimer = setTimeout(() => { el.ovOk.style.display = 'none'; }, 10000);
+     el.okClose.focus();
+    }
+   } finally {
+    sending = false;
+    el.send.disabled = false; el.send.textContent = '发送'; hideProgress();
    }
   }
   const doSend = () => {
-   if (sending || el.send.disabled) return; // v5.7.1：拦截 Ctrl+Enter 连按重入（按钮路径有 disabled 兜底，键盘路径此前无守卫，会整份内容双发）
+   if (sending || el.send.disabled) return;
    const sendBlocks = blocks.slice();
-   const sendTitle = el.title.value || pageTitle() || 'Untitled';
+   const sendTitle = resolveSendTitle(el.title.value);
    const sendTags = el.tags.value || '';
-   GM_setValue(STORAGE.LAST_TAGS, sendTags); // v5.2.0：记忆标签
-   accSuccess = []; // v5.5.0：全新发送重置成功累计
-   sendToAll(sendBlocks, sendTitle, sendTags, null, null);
+   GM_setValue(STORAGE.LAST_TAGS, sendTags);
+   accSuccess = [];
+   sendToAll(sendBlocks, sendTitle, sendTags, null, null, null)
+    .catch((err) => { console.error('[NC] 发送流程异常:', err); toast('发送流程异常: ' + (err?.message || '未知'), 'error'); });
   };
   function doRetry() {
    if (!cachedSend) { toast('没有可重试的内容', 'error'); return; }
+   const retryLabel = el.retry.textContent;
    el.retry.disabled = true; el.retry.textContent = '发送中...'; el.ovErr.style.display = 'none';
    el.title.value = cachedSend.title || pageTitle() || 'Untitled'; el.tags.value = cachedSend.tags || '';
-   el.modalCfm.classList.remove('minimized'); el.btnMin.textContent = '🔽'; el.btnMin.title = '最小化';
+   restoreConfirmModal();
    showProgress();
-   openConfirm(); // v5.5.0：统一入口——修复此前直接拉起弹窗未挂 onConfirmKey、重试后 Ctrl+Enter 失效
-   sendToAll(cachedSend.blocks, cachedSend.title, cachedSend.tags, cachedSend.failedPlatforms, cachedSend.notionResume || null)
-    .finally(() => { el.retry.disabled = false; el.retry.textContent = '🔄 重新发送失败项'; });
+   openConfirm();
+   sendToAll(cachedSend.blocks, cachedSend.title, cachedSend.tags, cachedSend.failedPlatforms, cachedSend.notionResume || null, cachedSend.feishuResume || null)
+    .catch((err) => { console.error('[NC] 重试流程异常:', err); toast('发送流程异常: ' + (err?.message || '未知'), 'error'); })
+    .finally(() => { el.retry.disabled = false; el.retry.textContent = retryLabel; });
   }
 
-  // ============================================================
-  // 密码可见性切换：工厂函数消除三处重复
-  // ============================================================
+  // ===== 密码可见性切换 =====
   function createPasswordToggle(input, button) {
    return () => {
     const show = input.type !== 'text';
@@ -2601,16 +2998,14 @@
   }
   el.tokTglNotion.addEventListener('click', createPasswordToggle(el.tok, el.tokTglNotion), { signal });
   el.tokTglFeishu.addEventListener('click', createPasswordToggle(el.fsSecret, el.tokTglFeishu), { signal });
-  el.tokTglObs.addEventListener('click', createPasswordToggle(el.obsApiKey, el.tokTglObs), { signal });
+  el.tokTglObsidian.addEventListener('click', createPasswordToggle(el.obsApiKey, el.tokTglObsidian), { signal });
 
-  // ============================================================
-  // 连接测试（v5.3.0）：设置面板逐平台验证表单中的凭证（无需先保存）
-  // ============================================================
-  async function runConnTest(btn, fn) {
-   if (btn.disabled) return;
+  // ===== 连接测试 =====
+  async function runConnTest(btn, fn, opts = {}) {
+   if (btn.disabled) return false;
    btn.disabled = true; const orig = btn.textContent; btn.textContent = '⏳ 测试中';
-   try { toast('✅ ' + await fn(), 'success'); }
-   catch (e) { toast('❌ ' + (e?.message || '测试失败'), 'error'); }
+   try { const msg = await fn(); if (!opts.silent) toast('✅ ' + msg, 'success'); return true; }
+   catch (e) { if (!opts.silent) toast('❌ ' + (e?.message || '测试失败'), 'error'); return false; }
    finally { btn.disabled = false; btn.textContent = orig; }
   }
   function testNotionConn() {
@@ -2622,7 +3017,7 @@
     const res = await gmRequest({ method: 'GET', url: `https://api.notion.com/v1/databases/${dbId}`, headers: { 'Authorization': `Bearer ${token}`, 'Notion-Version': '2022-06-28' } });
     if (res.status >= 200 && res.status < 300) {
      const info = tryParseJSON(res.responseText);
-     if (info) notionDbCache = { dbId, props: info.properties || {} }; // 测试成功即预热会话缓存（键为表单 dbId，保存后一致则命中）
+     if (info) notionDbCache = { dbId, props: info.properties || {} };
      const dbName = (info?.title || []).map(t => t.plain_text || '').join('');
      return `Notion 连接成功${dbName ? '：' + dbName : ''}`;
     }
@@ -2637,13 +3032,7 @@
    const secret = el.fsSecret.value.trim();
    const folder = el.fsFolder.value.trim();
    if (!appId || !secret) throw new Error('请先填写飞书 App ID 与 App Secret');
-   const authRes = await gmRequest({ method: 'POST', url: 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', headers: { 'Content-Type': 'application/json; charset=utf-8' }, data: JSON.stringify({ app_id: appId, app_secret: secret }) });
-   const authJson = tryParseJSON(authRes.responseText);
-   if (authJson === null) throw new Error('飞书鉴权响应解析失败');
-   if (authRes.status < 200 || authRes.status >= 300 || authJson.code !== 0)
-    throw new Error(`飞书鉴权失败(${authJson.code ?? authRes.status}): ${authJson.msg || ''}`);
-   const token = authJson.tenant_access_token;
-   // 创建并回收一篇测试文档：同时验证 docx 创建权限与文件夹 Token（真实发送链路）
+   const { token } = await fsAuthToken(appId, secret);
    const createRes = await gmRequest({ method: 'POST', url: 'https://open.feishu.cn/open-apis/docx/v1/documents', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' }, data: JSON.stringify(folder ? { title: '连接测试', folder_token: folder } : { title: '连接测试' }) });
    const createJson = tryParseJSON(createRes.responseText);
    const docId = createJson?.data?.document?.document_id;
@@ -2672,66 +3061,93 @@
   }
   el.testNotion.addEventListener('click', () => runConnTest(el.testNotion, testNotionConn), { signal });
   el.testFeishu.addEventListener('click', () => runConnTest(el.testFeishu, testFeishuConn), { signal });
-  el.testObs.addEventListener('click', () => runConnTest(el.testObs, testObsidianConn), { signal });
+  el.testObsidian.addEventListener('click', () => runConnTest(el.testObsidian, testObsidianConn), { signal });
+  el.testAll.addEventListener('click', async () => {
+   if (el.testAll.disabled) return;
+   el.testAll.disabled = true; const orig = el.testAll.textContent; el.testAll.textContent = '⏳ 巡检中';
+   try {
+    const jobs = [
+     { label: PLATFORM_LABELS.notion, ready: !!(el.tok.value.trim() && parseDbId(el.db.value.trim())), run: () => runConnTest(el.testNotion, testNotionConn, { silent: true }) },
+     { label: PLATFORM_LABELS.feishu, ready: !!(el.fsAppId.value.trim() && el.fsSecret.value.trim()), run: () => runConnTest(el.testFeishu, testFeishuConn, { silent: true }) },
+     { label: PLATFORM_LABELS.obsidian, ready: !!el.obsApiKey.value.trim(), run: () => runConnTest(el.testObsidian, testObsidianConn, { silent: true }) },
+    ];
+    const okList = [], failList = [], skipList = [];
+    for (const j of jobs) {
+     if (!j.ready) { skipList.push(j.label); continue; }
+     (await j.run() ? okList : failList).push(j.label);
+    }
+    if (!okList.length && !failList.length && !skipList.length) { toast('没有可测试的平台，请先填写凭证', 'error'); return; }
+    const parts = [];
+    if (okList.length) parts.push(`✅ ${okList.join('、')}`);
+    if (failList.length) parts.push(`❌ ${failList.join('、')}`);
+    if (skipList.length) parts.push(`⏭ 未配置跳过：${skipList.join('、')}`);
+    toast(parts.join('　'), failList.length ? 'error' : 'success');
+   } finally { el.testAll.disabled = false; el.testAll.textContent = orig; }
+  }, { signal });
 
-  // ============================================================
-  // 弹窗事件
-  // ============================================================
-  $('#btn-sc').addEventListener('click', () => { if (settingsDirty) { if (!confirm('有未保存的更改，确定关闭？')) return; settingsDirty = false; if (el.dirtyFlag) el.dirtyFlag.style.display = 'none'; } el.ovSet.style.display = 'none'; }, { signal });
+  // ===== 事件绑定 =====
+  const closeSettings = () => { el.ovSet.style.display = 'none'; restoreFocus(); };
+  $('#btn-sc').addEventListener('click', () => { if (!tryCloseSettings()) return; closeSettings(); }, { signal });
   $('#btn-ss').addEventListener('click', () => {
    const notionToken = el.tok.value.trim(); const dbRaw = el.db.value.trim(); const notionDbId = parseDbId(dbRaw);
    if (notionToken && dbRaw && !notionDbId) { toast('Notion Database ID / 链接格式不正确（应包含 32 位字符）', 'error'); return; }
+   const obsUrlToSave = el.obsApiUrl.value.trim();
+   if (obsUrlToSave && !isLocalishTarget(obsUrlToSave)) {
+    if (!confirm('⚠️ Obsidian API 地址指向外部主机，启用后每次剪藏都会把页面全文发送到该地址。确定保存？')) return;
+   }
    GM_setValue(STORAGE.ENABLE_NOTION, el.ckNotion.checked); GM_setValue(STORAGE.ENABLE_FEISHU, el.ckFeishu.checked);
-   GM_setValue(STORAGE.TOKEN, notionToken); GM_setValue(STORAGE.DB_ID, notionDbId); GM_setValue(STORAGE.TAGS_PROP, el.tag.value.trim());
-   GM_setValue(STORAGE.FS_APP_ID, el.fsAppId.value.trim()); GM_setValue(STORAGE.FS_APP_SECRET, el.fsSecret.value.trim()); GM_setValue(STORAGE.FS_FOLDER, el.fsFolder.value.trim());
    GM_setValue(STORAGE.ENABLE_OBSIDIAN, el.ckObsidian.checked);
-   GM_setValue(STORAGE.OBSIDIAN_API_URL, el.obsApiUrl.value.trim()); GM_setValue(STORAGE.OBSIDIAN_API_KEY, el.obsApiKey.value.trim());
-   GM_setValue(STORAGE.OBSIDIAN_FOLDER, el.obsFolder.value.trim());
-   GM_setValue(STORAGE.BLOCKLIST, el.blocklist.value.trim()); // v5.6.0
-   GM_setValue(STORAGE.DOMAIN_TAGS, el.domainTags.value.trim()); // v5.6.0
-   GM_setValue(STORAGE.SEND_PROFILE, el.sendProfile.value === 'standard' ? 'standard' : 'gentle'); // v5.7.0
-   refreshSettings(); // v5.2.0：保存后立即刷新快照，后续读取零延迟
-   settingsDirty = false; if (el.dirtyFlag) el.dirtyFlag.style.display = 'none'; el.ovSet.style.display = 'none'; toast('✅ 保存成功！');
+   for (const f of FORM_FIELDS) GM_setValue(f.key, f.save ? f.save(f.input.value) : f.input.value.trim());
+   GM_setValue(STORAGE.SEND_PROFILE, el.sendProfile.value === 'standard' ? 'standard' : 'gentle');
+   refreshSettings();
+   notionDbCache = { dbId: '', props: null };
+   settingsDirty = false; if (el.dirtyFlag) el.dirtyFlag.style.display = 'none'; closeSettings(); toast('✅ 保存成功！');
   }, { signal });
-  el.back.addEventListener('click', () => { closeConfirm(); blocks = []; hlTarget = null; imgDL = new Map(); imgDLBytes = 0; startSelect(); }, { signal });
-  // v5.5.0：「➕ 追加」——保留已选内容与标题/标签，回到页面继续选取并合并
+  el.back.addEventListener('click', () => { closeConfirm(); blocks = []; hlTarget = null; imgDL = new Map(); imgDLBytes = 0; imgFailTs.clear(); startSelect(); }, { signal });
   el.btnAdd.addEventListener('click', () => { appendMode = true; closeConfirm(); startSelect(); }, { signal });
   $('#btn-cc').addEventListener('click', closeConfirm, { signal });
   el.send.addEventListener('click', doSend, { signal });
   el.btnCopy.addEventListener('click', (e) => { e.stopPropagation(); copyText(textFromBlocks(blocks), '📋 已复制到剪贴板'); }, { signal });
+  // 确认弹窗「复制 Markdown」，与失败弹窗的 Markdown 复制能力对齐；两处共用同一生成/复制/报错流程
+  const copyBlocksMd = (bks, title, tags) => {
+   try { const { md } = buildMarkdown(bks, title, tags); copyText(md, '📋 已复制 Markdown 到剪贴板'); }
+   catch (err) { toast('生成 Markdown 失败: ' + (err?.message || '未知'), 'error'); }
+  };
+  el.btnCopyMd.addEventListener('click', (e) => {
+   e.stopPropagation();
+   copyBlocksMd(blocks, resolveSendTitle(el.title.value), el.tags.value || '');
+  }, { signal });
   el.btnMin.addEventListener('click', (e) => { e.stopPropagation(); const isMin = el.modalCfm.classList.toggle('minimized'); el.btnMin.textContent = isMin ? '🔼' : '🔽'; el.btnMin.title = isMin ? '还原' : '最小化'; confirmOpen = !isMin; }, { signal });
-  el.okOpenNotion.addEventListener('click', () => { if (!lastNotionPageId) return; const url = `https://www.notion.so/${lastNotionPageId.replace(/-/g, '')}`; /* v5.7.0 修复：按规范带 noopener 时 window.open 恒返回 null，旧写法必然误报「弹窗被阻止」；改为打开后手动切断 opener */ const win = window.open(url, '_blank'); if (win) { try { win.opener = null; } catch { /* v5.7.1：个别 WebView 跨域赋值防御 */ } } else { copyText(url, '📋 链接已复制（弹窗被阻止）'); } }, { signal });
-  el.okOpenFeishu.addEventListener('click', () => { if (!lastFeishuDocId) { window.open('https://www.feishu.cn/', '_blank'); return; } const url = `https://www.feishu.cn/docx/${lastFeishuDocId}`; /* v5.7.0：同 Notion——不再依赖恒为 null 的 noopener 返回值 */ const win = window.open(url, '_blank'); if (win) { try { win.opener = null; } catch { /* v5.7.1：个别 WebView 跨域赋值防御 */ } } else { copyText(url, '📋 链接已复制（弹窗被阻止）'); } }, { signal });
+  el.okOpenNotion.addEventListener('click', () => { if (!lastNotionPageId) return; openTab(`https://www.notion.so/${lastNotionPageId.replace(/-/g, '')}`); }, { signal });
+  el.okOpenFeishu.addEventListener('click', () => { if (!lastFeishuDocId) { openTab('https://www.feishu.cn/'); return; } openTab(`https://www.feishu.cn/docx/${lastFeishuDocId}`); }, { signal });
   el.okOpenObsidian.addEventListener('click', () => { const a = document.createElement('a'); a.href = 'obsidian://'; a.style.display = 'none'; document.body.appendChild(a); a.click(); a.remove(); }, { signal });
   el.okClose.addEventListener('click', () => { clearTimeout(okAutoCloseTimer); el.ovOk.style.display = 'none'; cachedSend = null; }, { signal });
   el.retry.addEventListener('click', doRetry, { signal });
   el.errCopy.addEventListener('click', () => { copyText(el.errDetail.textContent || '', '已复制错误详情'); }, { signal });
   el.errMd.addEventListener('click', () => {
    if (!cachedSend) { toast('没有可复制的内容', 'error'); return; }
-   try { const { md } = buildMarkdown(cachedSend.blocks, cachedSend.title || pageTitle() || 'Untitled', cachedSend.tags || ''); copyText(md, '📋 已复制 Markdown 到剪贴板'); }
-   catch (e) { toast('生成 Markdown 失败: ' + (e?.message || '未知'), 'error'); }
+   copyBlocksMd(cachedSend.blocks, resolveSendTitle(cachedSend.title), cachedSend.tags || '');
   }, { signal });
-  el.errClose.addEventListener('click', () => { el.ovErr.style.display = 'none'; cachedSend = null; }, { signal }); // v5.7.1：与 okClose 统一 cachedSend 清理时机
-  // ============================================================
-  // 全局快捷键 & 生命周期
-  // ============================================================
+  el.errClose.addEventListener('click', () => { el.ovErr.style.display = 'none'; cachedSend = null; }, { signal });
+  // ===== 全局快捷键与生命周期 =====
   function onGlobalKey(e) {
-   const active = document.activeElement;
+   // closed Shadow DOM 下 document.activeElement 经重定向恒为本脚本宿主 DIV，输入框聚焦判定优先读 shadow.activeElement
+   const active = shadow.activeElement || document.activeElement;
    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
-   if (e.altKey && e.shiftKey && e.code === 'KeyN') { e.preventDefault(); e.stopPropagation(); triggerClipper(); }
+   if (e.altKey && e.shiftKey && e.code === 'KeyN') {
+    if (e.repeat) { e.preventDefault(); return; }
+    e.preventDefault(); e.stopPropagation();
+    startPickFlow();
+   }
   }
-  // v5.5.0：发送期间拦截页面关闭/刷新，避免 Notion/飞书写入中途断掉产生半截内容
-  window.addEventListener('beforeunload', (e) => { if (sending) { e.preventDefault(); e.returnValue = ''; } }, { signal });
-  // v5.5.0：pagehide 挂上同一 signal——重复注入触发旧实例清理（ac.abort）时，
-  // 旧 pagehide 监听随 signal 一并移除，不再残留指向新实例 __ncCleanup 的陈旧句柄
+  // 确认弹窗存在未发送内容时（含最小化停放）离开页面同样警告，防剪藏草稿静默丢失
+  window.addEventListener('beforeunload', (e) => { if (sending || (blocks.length && el.ovCfm.style.display === 'flex')) { e.preventDefault(); e.returnValue = ''; } }, { signal });
   window.addEventListener('pagehide', (e) => { if (e.persisted) return; if (window.__ncCleanup) window.__ncCleanup(); }, { signal });
   document.addEventListener('keydown', onGlobalKey, { signal, capture: true });
   loadPos();
  }
 
- // ============================================================
- // 启动
- // ============================================================
+ // ===== 脚本入口 =====
  try {
   if (document.body) ncInit();
   else document.addEventListener('DOMContentLoaded', () => { try { ncInit(); } catch (err) { console.error('[Notion & Feishu & Obsidian Web Clipper] 初始化失败:', err.message || '未知错误'); } }, { once: true });
