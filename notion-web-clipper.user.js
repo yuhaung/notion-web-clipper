@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name Notion & Feishu & Obsidian Web Clipper
 // @namespace https://github.com/yuhaung/notion-web-clipper
-// @version      5.20.0
-// @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。变更日志见脚本头部 v5.16.x ~ v5.20.x 注释与 CHANGELOG.md。
+// @version      5.21.0
+// @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。变更日志见脚本头部 v5.16.x ~ v5.21.x 注释与 CHANGELOG.md。
 // @author yuhauang
 // @match *://*/*
 // @noframes
@@ -70,7 +70,8 @@
 // v5.20.0 发送流程重做（业务与存储契约不变）：① 修复进度条长时间冻结（用户反馈的「卡在 70% 不动」）：根因是飞书的块写入（10+bi/denom*60）与图片上传（70+bi/denom*15）两个上报器挂在同一批次循环内交替触发，而 mkProgress 有单调守卫——图片通常集中在前几批，进度在极早期跳到 70 后，之后所有块写入的上报都因 ≤70 被吞掉，直到收尾才一次跳满；只把区间改成不相交并不能解决（冻结位置只是从 70 挪到 95）。改为统一工作计量：分母 = 根批次数 + 全局图片数（递归前已知常量），每完成一个块批次或一张图片推进一个单元，进度成为「已完成单元/总单元」这一个单调函数；图片计数独立于 onProgress 判定（嵌套层 onProgress 为 null，若被其保护则嵌套图片永不入账、分母走不满）。② 修复发送中无法取消：新增 NcAbort 与可中断 sleep，AbortController 贯穿全链路（含 fsInsertTree 两处递归、Obsidian 队列、错峰等待、ensureUniquePath 探测）；「取消」与 Esc 改为走二次确认的停止入口，只拦「下一步」而不 abort 在飞请求，断点对账请求（notionCountChildren / fsCountChildren）刻意不接 signal 以便取消后仍能读回真实写入量；取消不计入 errors 而单列 aborted，重试集合 = 失败 + 已停止，两者都可从断点续传。③ 修复只启用 Notion 时进度永远差最后一格：Notion 完成原先只报 95 且被包在「还有剩余块」的分支里，改为在函数末尾报 100；续传进度改为把已完成部分计入基数（原从 10 重新起算，会被单调守卫全部吞掉，重试时进度纹丝不动）。④ 失败信息可操作化：mkSendError 保留 platform/status/code/message/credential/retryable/resume 结构化字段（原实现在 fail() 里就把 message 硬截断成 200 字，状态码与错误码全丢），错误面板按平台分组、长文本折叠而非硬截断，凭据类错误（401/403/飞书 9999166x）给出直达设置的入口，复制错误改从结构化数据源序列化（不再复制被折叠截断的 DOM 文本）；关闭失败面板增加二次确认（原实现直接丢弃整篇剪藏的 blocks 快照）。⑤ 进度改为分平台多行：总进度条是各平台进度的加权平均，无法暴露「A 已完成而 B 卡在 20%」，新增每个启用平台独占一行的独立进度与状态（等待中/发送中/完成/失败/已停止），失败与停止的行停在断点百分比上以便判断已写入多少。⑥ 发送中统一守卫 setSendingUI 收敛散落的禁用逻辑（原先「重选/追加」在发送中仍可点，会 closeConfirm 并清空 blocks，让后台还在跑的发送失去数据源）；accSuccess 改用 Map 去重（原数组在反复重试后会累积同名平台）；完成面板自动关闭新增倒计时进度条。
 // v5.19.0 正确性修复与热路径优化（业务与存储契约不变）：① 修复 Obsidian 写入静默覆盖：探测目标笔记是否存在时，原实现把「请求失败」与「文件不存在」都当作不存在（catch 后 exists 仍为 false），网络抖动或插件瞬时 5xx 时会用原路径直接 PUT，覆盖 vault 中已有同名笔记且不可撤销；改为三态判定（404→用原路径 / 200→改用时间戳路径 / 其余→中止写入），探测阶段的网络错误交 withRetry 重试，401 等确定性错误直接暴露原因。② 修复 listItemBlock 内 walk 深度被重置为 0，导致 WALK_DEPTH_MAX 对列表项内的深层嵌套完全失效（每层列表项都能再递归 60 层），深嵌套 DOM 可撑爆调用栈；改为接续外层深度。③ 私网 IP 判定补齐 240.0.0.0/4 保留段、255.255.255.255 广播地址与 192.0.0.0/24、192.0.2.0/24、198.51.100.0/24、203.0.113.0/24 文档段，原先漏判会让 SSRF 复核（isPrivateURL / finalUrl 复检）被绕过；并修正 fail-closed 判定的形态校验——原「标准点分四段」只校验每段 1~3 位数字、不校验 ≤255，999.1.1.1 等越界四段会命中该形态分支后跳过 fail-closed 被判为公网，与「形似 IP 却无法解析归类即按私有处理」的意图相悖，现改为仅认定合法四段，越界四段回落 fail-closed（越界四段不可解析，不影响任何合法公网主机）。④ 解析阶段 fragsToRT 对每个带格式的文本片段各做一次 JSON.stringify 求合并键，改为按 annot 对象身份缓存（同一父节点派生片段共享同一引用），消除行内格式密集段落上的重复序列化。⑤ 节点计数改用 TreeWalker 越过上限即停，整页选取（数万节点）从 O(n) 降为 O(limit)。⑥ 飞书 fsInsertTree 每批全量扫描 jobs/nest 改为按批预分组（区间二分），消除 O(批数×任务数) 空转。⑦ 预览删除单块改为增量摘除节点并重排索引，不再全量重建导致所有图片重新解码、滚动位置丢失。⑧ 常驻 mousemove/mouseup 改为 passive（原为拖拽时的冗余 preventDefault 所累，该 preventDefault 与 mousedown 处重复且 .nc-btn 已有 user-select:none）。⑨ 合并 notionCountChildren / fsCountChildren 为通用分页器 countPagedChildren；进度求和改增量维护；状态指示灯节点一次性解析缓存；isGet 判定移出重试闭包。
 // v5.18.0 信息架构与交互补全（业务与存储契约不变）：① 设置面板改「左侧标签栏 + 右侧内容区」八分区导航（通用/Notion/飞书/Obsidian/标签/备份/历史/快捷键），≤600px 由 CSS 降级为手风琴，同一份 DOM 两套呈现；上次所在分区持久化（nc_set_tab）；点击确认面板平台徽章直达对应分区；标签栏支持 ↑/↓ 键盘导航与 role=tablist 语义。② 手动主题切换（跟随系统 / 浅色 / 深色，存储键 nc_theme）：暗色令牌抽出为单一来源 DARK_VARS，由「系统深色且未被手动指定浅色」与「手动深色」两条选择器共用，避免两份副本漂移；同步接管 prefers-contrast 与 color-scheme；主题随配置备份导出/导入。③ 自绘确认对话框替换全部 5 处原生 confirm()（关闭未保存设置、导出未保存提示、导出含明文密钥、清空发送历史、保存外部 Obsidian API 地址），返回 Promise 并接入既有焦点记忆 / Tab 循环 / Esc 层级；原生 confirm 在部分站点会被 CSP 或页面脚本拦截改写。④ 平台状态三态可视化：分区指示灯与标签栏指示灯改为 on / warn（已启用但凭据不全）/ off，设置面板内读表单实时值（勾掉开关立刻灯灭，无需先保存）；悬浮球新增角标显示已就绪平台数，0 个时转警示态。⑤ 修正 Esc / Tab 的叠加层级顺序（ovSet 与 ovAsk 排在最前）。
-const SCRIPT_VERSION = '5.20.0';
+// v5.21.0 知乎选取逻辑专项（业务与存储契约不变）：① 修复 host 判定误判：原 `location.hostname.includes('zhihu.com')` 会把 evilzhihu.com、zhihu.com.evil.com 一并判为知乎，从而在非知乎页面上执行知乎专属清洗（按 ZHIHU_REMOVE 删节点、按 isZhihuMember 拦图片），剪藏结果被无声破坏且无从察觉；isTwitter 的 includes('x.com') 更宽——ox.com、x.company.com、x.com.evil.com 全部命中，会走 Twitter 会话解析。改为「精确匹配或子域」（h === base || h.endsWith('.' + base)）。② 修复 ↓ 键是死键：buildCandidates 原先只从命中元素向上收集祖先，候选序列恒为「best 最小、越往后越大」，↓（索引减一）永远被 clamp 在 0——点中整张回答卡后无法再缩小到正文。新增向内候选（.RichText / .Post-RichTextContainer / [itemprop="text"] / .QuestionAnswer-content / .RichContent-inner，按面积取最大的两级再升序插到 best 之前）；返回契约由数组改为 { cands, defaultIdx }，defaultIdx 指向 best 本身——默认仍是「点一下选整张卡片」，缩小是可选动作而非默认行为；提示条的元素描述随之跟随当前候选（原实现固定描述锚点，缩小后提示与实际选中范围不符）。③ 修复评论区解析失败静默降级：命中评论区选择器但 zhihuComments 返回空时，原实现 fall through 到通用克隆，把投票按钮、时间戳、头像、「查看回复」当成正文产出垃圾块；改为就此收敛并回传 hint，上层提示「该评论区未解析出评论，请先展开评论或改用整卡选取」。④ 修复源链接在选中正文时拿不到：zhihuSourceURL 原先只在目标内部向下查，选中 .RichText 时问题标题在目标之上，只能退化成用 location.pathname 拼问题链接，在专栏页与回答聚合页上拼出的是错误链接；改为先向上定位 .ContentItem / .Card 容器再查。zhihuAuthor 循环内的 root.closest('.AnswerItem') 外提（8 条选择器原本要做 8 次向上遍历）。⑤ 折叠长回答不再静默丢正文：知乎长回答默认只渲染截断版正文，靠 .ContentItem-more（「阅读全文」）手动展开，此时直接提取会产出「看起来正常但内容不全」的结果，是最难发现的一类缺陷。新增 zhihuFolded 检测（展开按钮文案 + .RichContent-inner 显式限高且内容溢出的兜底路径），命中时经 warn 通道提示「建议先点『阅读全文』再提取」；只提示不自动点击——展开会触发懒加载并改变滚动位置，属于用户决策。
+const SCRIPT_VERSION = '5.21.0';
  const C = Object.freeze({
   TEXT_SAFE: 1990, RT_ITEMS_MAX: 100, BATCH_SIZE: 100,
   TABLE_MAX_COLS: 5, TABLE_MAX_ROWS: 100, TAG_NAME_MAX: 100, URL_MAX: 2000,
@@ -1132,8 +1133,17 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   const ac = new AbortController(); const signal = ac.signal;
   _cleanupFns.push(() => ac.abort());
 
-  const isZhihu = location.hostname.includes('zhihu.com');
-  const isTwitter = location.hostname.includes('x.com') || location.hostname.includes('twitter.com');
+  // host 判定必须「精确匹配或子域」，不能用 includes。
+  // 原 `includes('zhihu.com')` 会把 evilzhihu.com、zhihu.com.evil.com 一并判为知乎，
+  // 从而在非知乎页面上执行知乎专属清洗（按 ZHIHU_REMOVE 删节点、按 isZhihuMember 拦图片），
+  // 剪藏结果被无声破坏且无从察觉；isTwitter 的 includes('x.com') 更宽——
+  // ox.com、x.company.com、x.com.evil.com 全部命中，会走 Twitter 会话解析。
+  const hostIs = (base) => {
+   const h = String(location.hostname || '').toLowerCase();
+   return h === base || h.endsWith('.' + base);
+  };
+  const isZhihu = hostIs('zhihu.com');
+  const isTwitter = hostIs('x.com') || hostIs('twitter.com');
   const isTwitterStatus = () => isTwitter && location.pathname.includes('/status/');
   const $ = (s, b = shadow) => b.querySelector(s);
 
@@ -1881,11 +1891,20 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   }
 
   // ===== 知乎页面适配 =====
+  // 向内候选：findTarget 在知乎上通常命中最外层的 .AnswerItem / .ContentItem，
+  // 而 buildCandidates 原先只从 best 向上收集祖先——候选序列恒为「best 最小、越往后越大」，
+  // ↓ 键（索引减一）因此永远被 clamp 在 0，是个死键：点了正文段落选中整张回答卡后无法再缩小。
+  // 这里登记 best 内部更精确的正文容器，由 buildCandidates 插到 best 之前，让 ↓ 真正可用。
+  // 只用脚本里已验证过的类名，不引入未经实测的新选择器。
+  const ZHIHU_INNER_CANDIDATES = ['.RichText', '.Post-RichTextContainer', '[itemprop="text"]', '.QuestionAnswer-content', '.RichContent-inner'];
   const removeAvatarImgs = (root) => root.querySelectorAll('img').forEach(img => { if (isAvatar(img) || isZhihuMember(img)) img.remove(); });
   function cleanZhihu(clone) { clone.querySelectorAll(ZHIHU_REMOVE).forEach(n => n.remove()); removeAvatarImgs(clone); return clone; }
   function zhihuAuthor(root) {
+   // 原先 root.closest('.AnswerItem') 写在循环体内，8 条选择器就要向上遍历 8 次；
+   // 同一个 root 的结果恒定，外提为一次性计算。
+   const card = root.closest?.('.AnswerItem') || null;
    for (const s of ['.UserLink', '.AuthorInfo-name', '.AnswerItem-authorInfo .UserLink', '.ContentItem-authorInfo .UserLink', '.Post-Author .UserLink', '.AuthorInfo .UserLink', '.AnswerItem-authorInfo a[href*="/people/"]', '.ContentItem-authorInfo a[href*="/people/"]']) {
-    const found = root.querySelector(s) || root.closest('.AnswerItem')?.querySelector(s);
+    const found = root.querySelector(s) || card?.querySelector(s);
     if (found) return found.textContent.trim().replace(/\s+/g, ' ');
    }
    return null;
@@ -1907,11 +1926,38 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    return null;
   }
   function zhihuSourceURL(root) {
-   const link = root.querySelector('h2 a[href*="/question/"]') || root.querySelector('.ContentItem-title a[href*="/question/"]') || root.querySelector('.QuestionItem-title a');
-   if (link?.href) return safeURL(link.href);
+   // 原先只在 root 内部向下查：选中正文（.RichText / .RichContent-inner）时问题标题在
+   // root 之上，querySelector 拿不到，只能退化成用 location.pathname 拼问题链接——
+   // 在专栏、回答聚合页上拼出来的链接是错的。改为先向上定位卡片容器再查。
+   const card = root.closest?.('.ContentItem') || root.closest?.('.Card') || root.closest?.('[itemprop="suggestedAnswer"]') || root.closest?.('.AnswerItem');
+   for (const scope of [root, card]) {
+    if (!scope?.querySelector) continue;
+    const link = scope.querySelector('h2 a[href*="/question/"]') || scope.querySelector('.ContentItem-title a[href*="/question/"]') || scope.querySelector('.QuestionItem-title a');
+    if (link?.href) { const u = safeURL(link.href); if (u) return u; }
+   }
    const m = location.pathname.match(/\/question\/(\d+)/);
    if (m) return `https://www.zhihu.com/question/${m[1]}`;
    return safeURL(location.href);
+  }
+  // 折叠检测：知乎长回答默认只渲染截断版正文，靠 .ContentItem-more（「阅读全文」）手动展开。
+  // 此时直接提取会静默丢掉后半篇——产出看起来正常但内容不全，是最难发现的一类缺陷。
+  // 只检测并提示，不自动点击：展开会触发懒加载、改变页面滚动位置，属于用户决策。
+  // 必须在 live DOM（target）上检测，clone 已被 cleanZhihu 按 ZHIHU_REMOVE 删掉该按钮。
+  function zhihuFolded(root) {
+   const card = root.closest?.('.ContentItem') || root.closest?.('.AnswerItem') || root.closest?.('.Card');
+   for (const s of [root, card]) {
+    if (!s?.querySelectorAll) continue;
+    for (const n of s.querySelectorAll('.ContentItem-more, [class*="ContentItem-more"], .ContentItem-rightButton')) {
+     if (/阅读全文|展开全文|显示全部|查看全部/.test((n.textContent || '').replace(/\s+/g, ''))) return true;
+    }
+   }
+   // 兜底：新版知乎用 .RichContent-inner 显式限高表示折叠，此时未必还有文字按钮
+   const inner = root.querySelector?.('.RichContent-inner') || card?.querySelector?.('.RichContent-inner');
+   if (inner) {
+    const mh = parseFloat(inner.style?.maxHeight || '');
+    if (Number.isFinite(mh) && mh > 0 && inner.scrollHeight > mh + 40) return true;
+   }
+   return false;
   }
   const ZHIHU_COMMENT_ITEM = '.CommentItemV2, .CommentItem';
   const ZHIHU_REPLY_ITEM = '.ReplyItem';
@@ -2169,14 +2215,19 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     if (article) return { blocks: [twAuthorHeader(article), ...twTextBlocks(article), ...twMediaBlocks(article)], title };
    }
    if (isZhihu && target.matches && (target.matches(ZHIHU_REPLY_ITEM) || target.matches(ZHIHU_COMMENT_ITEM) || target.matches(ZHIHU_COMMENT_BOX))) {
+    // 命中评论区选择器后必须走专用解析并就此收敛：评论区 DOM 里塞满投票按钮、
+    // 时间戳、头像、「查看回复」等交互件，通用克隆会把它们当成正文，产出不可用的垃圾块。
+    // 解析为空说明「该评论区此刻确实没有可提取的评论」，不是「换条路再试一次」，
+    // 因此不再 fall through，改为回传 hint 让上层给出可操作提示。
     const cb = zhihuComments(target);
-    if (cb.length) return { blocks: cb, title };
+    return { blocks: cb, title, hint: cb.length ? '' : '该评论区未解析出评论，请先展开评论或改用整卡选取' };
    }
    const clone = safeClone(target);
    if (!clone) return { blocks: [], title };
    if (isZhihu) {
     const qTitle = zhihuQuestionTitle(target);
     const srcUrl = zhihuSourceURL(target);
+    const warn = zhihuFolded(target) ? '检测到回答未展开，正文可能被截断——建议先点「阅读全文」再提取' : '';
     if (qTitle) for (const s of ['.ContentItem-title', 'h2.ContentItem-title']) clone.querySelectorAll(s).forEach(n => n.remove());
     cleanZhihu(clone);
     const body = blocksFromClone(clone);
@@ -2185,7 +2236,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const author = zhihuAuthor(target);
     if (author) prefix.push(mkPara(`作者：${author}`));
     if (srcUrl) prefix.push(mkRichPara([{ type: 'text', text: { content: qTitle ? '🔗 问题链接' : '🔗 原文链接', link: { url: srcUrl } } }]));
-    return { blocks: [...prefix, ...body], title: qTitle || title };
+    return { blocks: [...prefix, ...body], title: qTitle || title, warn };
    }
    return { blocks: blocksFromClone(clone), title };
   }
@@ -2230,8 +2281,36 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   }
 
   // ===== 选取候选与范围 =====
+  const rectArea = (n) => { const r = n.getBoundingClientRect(); return r.width * r.height; };
+  // 返回 { cands, defaultIdx }：cands 由小到大（索引越大范围越大，与 ↑ 增大 / ↓ 减小的
+  // 键位语义一致），defaultIdx 指向 best 本身。
+  // 原先只返回数组且默认选 cands[0]——引入向内候选后 best 不再位于索引 0，
+  // 若仍固定取 0 会让默认选中范围变成最小的正文，改变既有习惯。
   function buildCandidates(best) {
-   const cands = [best];
+   // 向内候选：best 内部的正文容器比 best 小，排在 best 之前，使 ↓ 能缩小范围。
+   // 非知乎站点 ZHIHU_INNER_CANDIDATES 不生效，行为与原先完全一致。
+   const inner = [];
+   if (isZhihu && best?.querySelectorAll) {
+    const bestArea = rectArea(best);
+    const seen = new Set([best]);
+    const measured = [];
+    for (const s of ZHIHU_INNER_CANDIDATES) {
+     for (const n of best.querySelectorAll(s)) {
+      if (seen.has(n)) continue;
+      const r = n.getBoundingClientRect();
+      // 尺寸下限过滤空容器；面积上限剔除溢出父元素的异常布局（罕见但会让候选序错乱）
+      if (r.width > 50 && r.height > 50 && r.width * r.height < bestArea * 0.98) {
+       seen.add(n);
+       measured.push({ node: n, area: r.width * r.height });
+      }
+     }
+    }
+    // 先按面积降序取最大的两级（最接近 best 的层级最有缩小价值），再反转成升序，
+    // 保证「索引越大范围越大」：… → 较小的正文 → 较大的内容区 → best → 祖先 …
+    measured.sort((a, b) => b.area - a.area);
+    for (const m of measured.slice(0, 2).reverse()) inner.push(m.node);
+   }
+   const cands = [...inner, best];
    let cur = best.parentElement;
    while (cur && cur !== document.body && cur !== document.documentElement) {
     if (BLOCK_TAGS.has(cur.tagName)) {
@@ -2240,19 +2319,23 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     }
     cur = cur.parentElement;
    }
-   return cands;
+   return { cands, defaultIdx: inner.length };
   }
   // 选取提示变更检测——每次鼠标帧回调都重写 el.tip.textContent，
   // 同一目标上移动鼠标时为纯冗余 DOM 写入；签名（元素描述+索引+候选数）未变时跳过。
   // positionHL 仍每帧执行（元素位置可能随页面变化），仅文本写入被短路。
   // 元素描述串随候选集重建时缓存（selDesc），签名比对不再逐帧 describeElement
   // （原实现每帧对当前目标做 className split/拼接）；锚点不变时 selDesc 稳定，行为等价。
-  let tipSig = '', selDesc = '';
+  // v5.21.0：候选已可向内缩小，当前目标不再恒等于锚点，描述必须跟随 selIdx；
+  // 用 selDescIdx 守卫把重算限定在「索引真的变了」时（按键是低频操作），
+  // 而不是每帧一次，以保住上面这条优化。
+  let tipSig = '', selDesc = '', selDescIdx = -1;
   function applySelection() {
    const t = selCands[selIdx];
    if (!t) return;
    hlTarget = t;
    positionHL(t);
+   if (selIdx !== selDescIdx) { selDescIdx = selIdx; selDesc = describeElement(t); }
    const sig = `${selDesc}|${selIdx}/${selCands.length}`;
    if (sig !== tipSig) {
     tipSig = sig;
@@ -2495,9 +2578,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     if (best) {
      if (best !== selAnchor) {
       selAnchor = best;
-      selCands = buildCandidates(best);
-      selIdx = 0;
-      selDesc = describeElement(best);
+      // 默认停在 best（defaultIdx 指向它），而非索引 0——索引 0 起是向内的更小候选，
+      // 默认就选中最小的会改变「点一下选中整张卡片」的既有习惯。
+      const bc = buildCandidates(best);
+      selCands = bc.cands;
+      selIdx = bc.defaultIdx;
+      selDescIdx = -1;              // 强制 applySelection 按新的当前目标重算描述
      }
      applySelection();
     } else clearHL();
@@ -2515,8 +2601,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const best = (hlTarget && document.contains(hlTarget)) ? hlTarget : findTarget(t);
    if (!best) return;
    try {
-    const { blocks: b, title } = extractBlocks(best, { altClick: e.altKey });
-    if (!b.length) { toast('所选元素未提取到有效内容', 'error'); return; }
+    // hint：提取为空时专用的可操作原因（如评论区未展开）；warn：提取成功但内容可能不全（如回答折叠）
+    const { blocks: b, title, hint, warn } = extractBlocks(best, { altClick: e.altKey });
+    if (!b.length) { toast(hint || '所选元素未提取到有效内容', 'error'); return; }
+    if (warn) toast(warn, 'info');
     if (b.length > C.BLOCKS_WARN) toast(`提取了 ${b.length} 个块，内容较多，发送可能较慢`, 'info');
     stopSelect();
     if (appendMode) {
@@ -2554,7 +2642,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    selecting = true;
    if (modeAc) { modeAc.abort(); modeAc = null; }
    modeAc = new AbortController();
-   selCands = []; selIdx = 0; selAnchor = null; tipSig = ''; selDesc = '';
+   selCands = []; selIdx = 0; selAnchor = null; tipSig = ''; selDesc = ''; selDescIdx = -1;
    el.tip.textContent = appendMode ? '🔍 追加模式：悬停高亮元素，单击追加 (↑↓调范围 · Esc返回)' : `🔍 悬停高亮元素，单击提取内容 (↑↓调整范围 · Esc取消${isTwitterStatus() ? ' · Alt+单击仅本条' : ''})`;
    el.tip.style.display = 'block';
    el.mask.style.display = 'block';
@@ -2572,7 +2660,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    clearHL();
    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
    if (modeAc) { modeAc.abort(); modeAc = null; }
-   selCands = []; selIdx = 0; selAnchor = null; tipSig = ''; selDesc = '';
+   selCands = []; selIdx = 0; selAnchor = null; tipSig = ''; selDesc = ''; selDescIdx = -1;
   }
 
   // ===== 预览渲染 =====
