@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Notion & Feishu & Obsidian Web Clipper
 // @namespace https://github.com/yuhaung/notion-web-clipper
-// @version      5.23.0
+// @version      5.24.0
 // @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。变更日志见脚本头部 v5.16.x ~ v5.23.x 注释与 CHANGELOG.md。
 // @author yuhauang
 // @match *://*/*
@@ -53,18 +53,13 @@
 // @connect *.larksuite.com
 // @license MIT
 // ==/UserScript==
-
 (function () {
  'use strict';
  if (window.self !== window.top) return;
-
- // ---- 单实例清理：重复注入时先卸载旧实例 ----
  if (typeof window.__ncCleanup === 'function') { try { window.__ncCleanup(); } catch {   } }
  const _cleanupFns = [];
  window.__ncCleanup = () => { for (const fn of _cleanupFns) { try { fn(); } catch {   } } _cleanupFns.length = 0; };
-
- // ===== 常量与配置 =====
- const SCRIPT_VERSION = '5.23.0';
+const SCRIPT_VERSION = '5.24.0';
  const C = Object.freeze({
   TEXT_SAFE: 1990, RT_ITEMS_MAX: 100, BATCH_SIZE: 100,
   TABLE_MAX_COLS: 5, TABLE_MAX_ROWS: 100, TAG_NAME_MAX: 100, URL_MAX: 2000,
@@ -80,7 +75,6 @@
   TW_CONV_MAX: 60, IMG_FAIL_TTL: 30000, IMG_FAIL_MAX: 256,
   NOTION_REQ_BLOCKS_MAX: 950, NOTION_REQ_BYTES_MAX: 450 * 1024,
  });
-
  const SEND_PROFILES = Object.freeze({
   gentle: Object.freeze({ staggerMs: 700, imgConc: 2, apiGapMs: 550 }),
   standard: Object.freeze({ staggerMs: 300, imgConc: 3, apiGapMs: 350 }),
@@ -101,7 +95,6 @@
   THEME: 'nc_theme',
   SET_TAB: 'nc_set_tab',
 });
-
  const FS_BLK = Object.freeze({ TEXT: 2, H1: 3, H2: 4, H3: 5, H4: 6, H5: 7, H6: 8, H7: 9, H8: 10, H9: 11, BULLET: 12, ORDERED: 13, CODE: 14, QUOTE: 15, DIVIDER: 22, IMAGE: 27 });
  const FS_NESTABLE = new Set([FS_BLK.TEXT, FS_BLK.BULLET, FS_BLK.ORDERED, FS_BLK.QUOTE, FS_BLK.CODE, FS_BLK.DIVIDER, FS_BLK.IMAGE]);
  const BLOCK_TAGS = new Set(['P','DIV','SECTION','ARTICLE','LI','BLOCKQUOTE','H1','H2','H3','H4','H5','H6','PRE','TABLE','ASIDE','MAIN','HEADER','FOOTER']);
@@ -114,14 +107,8 @@
  const LANG_ALIAS = Object.freeze({ js:'javascript',ts:'typescript',py:'python',sh:'shell',zsh:'bash',fish:'shell',cpp:'c++',cxx:'c++',csharp:'c#',golang:'go',rs:'rust',rb:'ruby',kt:'kotlin',objc:'objective-c',md:'markdown',yml:'yaml',plaintext:'plain text',txt:'plain text',text:'plain text',html5:'html',vue:'html',jsx:'javascript',tsx:'typescript','c++20':'c++',shellsession:'shell',console:'shell',ini:'plain text',conf:'plain text' });
  const FEISHU_LANG_MAP = { 'plain text':1,'abap':2,'ada':3,'apache':4,'apex':5,'assembly':6,'bash':7,'c#':8,'c++':9,'c':10,'cobol':11,'css':12,'coffeescript':13,'d':14,'dart':15,'delphi':16,'django':17,'docker':18,'erlang':19,'fortran':20,'foxpro':21,'go':22,'groovy':23,'html':24,'htmlbars':25,'http':26,'haskell':27,'json':28,'java':29,'javascript':30,'julia':31,'kotlin':32,'latex':33,'lisp':34,'logo':35,'lua':36,'matlab':37,'makefile':38,'markdown':39,'nginx':40,'objective-c':41,'openedgeabl':42,'php':43,'perl':44,'postscript':45,'powershell':46,'prolog':47,'protobuf':48,'python':49,'r':50,'rpg':51,'ruby':52,'rust':53,'sas':54,'scss':55,'sql':56,'scala':57,'scheme':58,'scratch':59,'shell':60,'swift':61,'thrift':62,'typescript':63,'vbscript':64,'visual basic':65,'xml':66,'yaml':67,'cmake':68,'diff':69,'gherkin':70,'graphql':71,'glsl':72,'properties':73,'solidity':74,'toml':75 };
  const IMG_EXT = Object.freeze({ 'image/jpeg':'jpg','image/jpg':'jpg','image/png':'png','image/gif':'gif','image/webp':'webp','image/bmp':'bmp','image/tiff':'tif','image/svg+xml':'svg','image/x-icon':'ico','image/vnd.microsoft.icon':'ico','image/heic':'heic','image/heif':'heif','image/avif':'avif' });
- // localhost 与私网 IP 字面量判定统一在 isSensitiveHost 内完成（含 *.localhost 子域），与 isPrivateURL 口径一致
  const SENSITIVE_DOMAINS = [/bank\./i,/mail\./i,/outlook\./i,/^pay\./i,/alipay\./i,/tenpay\./i,/paypal\./i,/^passport\./i,/^account\./i,/^auth\./i,/^login\./i,/^admin\./i,/^console\./i,/^manage\./i,/^dashboard\./i];
-
  const PLATFORM_LABELS = Object.freeze({ notion: 'Notion', feishu: '飞书', obsidian: 'Obsidian' });
-
- // ===== 通用工具与重试 =====
- // v5.20.0：可中断等待。signal 用于「发送中停止」，等待期间 abort 立即兑现，
- // 并清掉定时器，避免已取消的流程仍占着一次 setTimeout。
  const sleep = (ms, signal) => {
   if (signal?.aborted) return Promise.reject(new NcAbort());
   return new Promise((resolve, reject) => {
@@ -131,17 +118,13 @@
   });
  };
  const pad2 = (n) => String(n).padStart(2, '0');
- // 用户主动停止的信号量。单独成类是为了把它与真实失败区分开：
- // 取消不该被当成错误重试，也不该被 withRetry 的退避逻辑再次拉长。
  class NcAbort extends Error {
   constructor() { super('已停止发送'); this.name = 'NcAbort'; this.aborted = true; }
  }
  const isAbort = (err) => !!err && (err instanceof NcAbort || err?.aborted === true || err?.name === 'AbortError');
-
  function tryParseJSON(text) {
   try { return JSON.parse(text); } catch { return null; }
  }
-
 const _hdrReCache = new Map();
 function parseResponseHeader(res, name) {
  const headers = String(res?.responseHeaders || '');
@@ -150,22 +133,14 @@ function parseResponseHeader(res, name) {
  const m = headers.match(re);
  return m ? m[1].trim() : '';
 }
-
  function isRetryableError(err) {
   return !!err && (!!err.network || err.status === 429 || (err.status >= 500 && err.status < 600));
  }
-
- /**
-  * 通用重试包装器：统一 Notion / 飞书 / Obsidian / 图片下载的退避逻辑。
-  * @param {() => Promise<T>} fn 业务函数，抛出的 error 可携带 retryable/network/retryAfter/status
-  * @param {object} opts retries / baseDelay / retryOn(err,attempt)
-  */
  async function withRetry(fn, opts) {
   const { retries = C.API_RETRY, baseDelay = 1000, retryOn, signal } = opts || {};
   const total = Math.max(1, retries);
   let lastErr = null;
   for (let attempt = 0; attempt < total; attempt++) {
-   // v5.20.0：每次 attempt 开始前先让位给取消信号，避免「点了停止还要再重试三轮」。
    if (signal?.aborted) throw new NcAbort();
    try { return await fn(attempt, lastErr); }
    catch (err) {
@@ -174,7 +149,6 @@ function parseResponseHeader(res, name) {
     const retryable = retryOn ? retryOn(err, attempt) : isRetryableError(err);
     if (attempt < total - 1 && retryable) {
      const retryAfterSec = (err?.retryAfter || 0);
-     // 退避等待期间同样可被取消——重试间隔最长可达数十秒，正是用户最可能点停止的时候。
      if (retryAfterSec > 0) { await sleep(Math.min(retryAfterSec * 1000 + 250, 60000), signal); continue; }
      const backoff = baseDelay * (1 << attempt);
      const jitter = 0.75 + Math.random() * 0.5;
@@ -186,7 +160,6 @@ function parseResponseHeader(res, name) {
   }
   throw lastErr;
  }
-
  function isSensitiveHost(hostname) {
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (h === 'localhost' || h.endsWith('.localhost')) return true;
@@ -194,7 +167,6 @@ function parseResponseHeader(res, name) {
   for (const re of SENSITIVE_DOMAINS) if (re.test(h)) return true;
   return false;
  }
-
  function isUserBlocked(hostname, raw) {
   const h = String(hostname || '').toLowerCase();
   if (!h) return false;
@@ -206,7 +178,6 @@ function parseResponseHeader(res, name) {
   }
   return false;
  }
-
  function matchDomainTags(raw, hostname) {
   const h = String(hostname || '').toLowerCase();
   if (!h) return '';
@@ -220,13 +191,8 @@ function parseResponseHeader(res, name) {
   }
   return '';
  }
-
- // v5.19.0 补齐：240.0.0.0/4 保留段、255.255.255.255 广播地址，
- // 以及文档专用段 192.0.0.0/24、192.0.2.0/24、198.51.100.0/24、203.0.113.0/24。
- // 这些段都不是可路由公网地址，原先漏判会让 SSRF 复核（isPrivateURL / gmRequest finalUrl 复检）被绕过。
  const PRIVATE_IPV4_RE = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|198\.1[89]\.|198\.51\.100\.|192\.0\.[02]\.|203\.0\.113\.|2(4\d|5\d)\.)/;
  const PRIVATE_IPV6_RE = /^(::1$|fe80:|fc00:|fd00:)/i;
- // === '[::ffff:7f00:1]' —— WHATWG URL 将 IPv6 序列化为十六进制组而非点分十进制；
  function ipv4FromMappedHost(host) {
   const m = /^::ffff:(.+)$/i.exec(String(host || ''));
   if (!m) return null;
@@ -243,7 +209,6 @@ function parseResponseHeader(res, name) {
   if (!(hi >= 0 && hi <= 0xffff) || !(lo >= 0 && lo <= 0xffff)) return null;
   return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff];
  }
- // 私有网段/IP 字面量判定单一来源——isSensitiveHost 与 isPrivateURL 共用同一口径。
  function isPrivateIPLiteral(host) {
   const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
   let ipClassified = false;
@@ -258,10 +223,6 @@ function parseResponseHeader(res, name) {
    return true;
   }
   if (PRIVATE_IPV6_RE.test(h)) return true;
-  // IP 字面量 fail-closed——形似 IP 却无法解析归类的按私有处理：① 含 ':' 的其余 IPv6 变体；
-  // v5.19.0 补注：isStdQuad 只认定「四段且每段 0~255」的合法点分十进制。原先仅用 \d{1,3} 校验位数、
-  // 不校验数值，999.1.1.1 这类越界的非法四段会命中 isStdQuad 从而绕过下面的 fail-closed 分支被判为公网，
-  // 与「无法解析归类即按私有处理」的设计意图相悖。越界四段不是可解析主机名，收紧只影响此类非法输入。
   const quad = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
   const isStdQuad = !!quad && quad.slice(1).every((s) => Number(s) <= 255);
   if (!ipClassified && !isStdQuad && (h.includes(':') || /^[\d.]+$/.test(h) || /^0x[0-9a-f]+$/i.test(h))) return true;
@@ -276,7 +237,6 @@ function parseResponseHeader(res, name) {
    return false;
   } catch { return false; }
  }
-
  function isLocalishTarget(urlStr) {
   try {
    const u = new URL(String(urlStr || '').trim());
@@ -284,7 +244,6 @@ function parseResponseHeader(res, name) {
    return isPrivateURL('https://' + u.hostname);
   } catch { return false; }
  }
-
  function normURL(raw) {
   if (!raw || typeof raw !== 'string') return null;
   let u = raw.trim();
@@ -308,7 +267,6 @@ function parseResponseHeader(res, name) {
   if (DATA_IMG_RE.test(s)) return s;
   return normOrSafe(s);
  }
- // 协议相对 / 根相对补全优先，其次走 new URL 校验；两阶段解析在多处复用，收敛为具名函数
  const normOrSafe = (raw) => normURL(raw) || safeURL(raw);
  function parseDbId(raw) {
   const s = String(raw || '').trim();
@@ -316,10 +274,6 @@ function parseResponseHeader(res, name) {
   const m = s.replace(/-/g, '').match(/[a-f0-9]{32}/i);
   return m ? m[0] : '';
  }
-
- // 合并 INLINE_TAGS 与 A 两个冗余分支（原两分支仅差末尾换行，且两类标签集无交集，
- // 合并后行为等价）；firstChild/nextSibling 直连遍历 + 字符串累加替代 parts 数组，
- // 消除每次调用的临时数组与 join 开销——表格逐格、标题提取等高频路径收益明显。
  function innerText(node) {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent;
   if (node.nodeType !== Node.ELEMENT_NODE) return '';
@@ -340,8 +294,6 @@ function parseResponseHeader(res, name) {
   if (tag === 'CODE') a.code = true;
   return Object.keys(a).length ? a : null;
  }
-
- // ===== 图片类型嗅探与 data: 解码 =====
  const IMG_SIGNATURES = [
   { sig: [0x89,0x50,0x4E,0x47], ct: 'image/png' },
   { sig: [0xFF,0xD8,0xFF], ct: 'image/jpeg' },
@@ -373,7 +325,6 @@ function parseResponseHeader(res, name) {
   }
   return null;
  }
-
  function decodeDataURL(url) {
   const m = /^data:image\/[a-z0-9.+-]+;base64,(.+)$/is.exec(url);
   if (!m) return null;
@@ -389,8 +340,6 @@ function parseResponseHeader(res, name) {
    return { buf: bytes.buffer, ct: 'image/unknown' };
   } catch { return null; }
  }
-
- // ===== Notion 块构建 =====
  function toRich(text) {
   const s = String(text ?? '');
   if (!s) return [];
@@ -447,7 +396,6 @@ function parseResponseHeader(res, name) {
   if (type === 'video') return { object: 'block', type: 'video', video: { type: 'external', external: { url } } };
   return { object: 'block', type: 'embed', embed: { url } };
  }
- // mkMedia 返回块或 null；调用方多需要「0 或 1 个块」的数组，收敛为具名函数
  const mediaBlocks = (type, url) => { const b = mkMedia(type, url); return b ? [b] : []; };
  function mkTable(rows, hasHeader) {
   const valid = rows.filter(r => Array.isArray(r) && r.length > 0);
@@ -512,8 +460,6 @@ function parseResponseHeader(res, name) {
   if (flat.length) toggle.children = flat;
   return { object: 'block', type: 'toggle', toggle };
  };
-
- // ===== 飞书块转换 =====
  function richToFeishuElements(rt) {
   const elements = [];
   for (const item of rt || []) {
@@ -598,8 +544,6 @@ function parseResponseHeader(res, name) {
    }
   }
  }
-
- // ===== Markdown 序列化 =====
  const mdUrl = (u) => String(u || '').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29');
  function richToMd(rt) {
   if (!rt) return '';
@@ -616,8 +560,6 @@ function parseResponseHeader(res, name) {
    return text;
   }).join('');
  }
- // 片段收集到数组后单次 join 返回——循环内 md += 会累计 O(块数) 次拼接，
- // 长文档（数千块、嵌套列表）时字符串树膨胀且每次拼接产生新串；数组 + join 为线性路径。行为不变。
  function blocksToMarkdown(blocks, indent = '') {
   const out = [];
   for (const b of blocks) {
@@ -646,14 +588,11 @@ function parseResponseHeader(res, name) {
   }
   return out.join('');
  }
-
  const normalizeObsidianBase = (raw) => {
   let b = String(raw || '').trim() || 'http://127.0.0.1:27123';
   if (!/^https?:\/\//i.test(b)) b = 'http://' + b;
   return b.replace(/\/+$/, '').replace(/\/vault$/i, '');
  };
-
- // ===== 设置读取与存储 =====
  function readSettings() {
   return {
    notionToken: GM_getValue(STORAGE.TOKEN, ''),
@@ -677,10 +616,6 @@ function parseResponseHeader(res, name) {
  let S = readSettings();
  const refreshSettings = () => { S = readSettings(); };
  const getProfile = () => SEND_PROFILES[S.sendProfile] || SEND_PROFILES.gentle;
-
- // ===== UI 样式与模板 =====
-// 暗色令牌只写一份，由「系统深色且未被手动指定浅色」与「手动指定深色」两条选择器共用，
-// 避免同一套色值出现两份副本后逐渐漂移。
 const DARK_VARS = `--c-bg:#1e1e1e;--c-surface-sunken:#242424;--c-scrollbar:#4a4a4a;--c-scrollbar-hover:#626262;--c-badge-on-bg:#243447;--c-badge-on-text:#8ec2f5;--c-badge-off-bg:#2f2f2f;--c-badge-off-text:#9a9a9a;--sh-pop:0 8px 24px rgba(0,0,0,.5);--sh-hi:0 12px 28px rgba(0,0,0,.6);--sh-inset-t:inset 0 1px 0 rgba(255,255,255,.08);--c-toast-shadow:0 6px 20px rgba(0,0,0,.45);--c-text:#e0e0e0;--c-text-sec:#bbb;--c-border:#444;--c-border-hover:#5a5a5a;--c-input-bg:#2a2a2a;--c-bg-sec:#333;--c-pv-bg:#2a2a2a;--c-pv-text:#ddd;--c-pv-border:#444;--c-code-bg:#333;--c-th-bg:#383838;--c-td-border:#555;--c-btn-sec-bg:#333;--c-btn-sec-text:#e0e0e0;--c-btn-ghost-bg:#1e1e1e;--c-btn-ghost-text:#5b9fe6;--c-btn-ghost-border:#5b9fe6;--c-help:#9a9a9a;--c-kbd-bg:#333;--c-kbd-border:#555;--c-progress-bg:#444;--c-err-bg:#3a1a1a;--c-err-border:#5c2828;--c-err-text:#ff6b6b;--c-err-succ-bg:#1a3a1a;--c-err-succ-border:#2d5c2d;--c-err-succ-text:#6bdf6b;--c-accent:#5b9fe6;--c-accent-hover:#4a8ed5;--c-accent-strong:#5b9fe6;--c-accent-ink:#5b9fe6;--c-toast-info:#b45309;--c-ring:rgba(91,159,230,.2);--c-success:#6bdf6b;--c-success-solid:#2d7d46;--c-danger:#ff6b6b;--c-danger-solid:#b71c1c;--c-danger-solid-hover:#8e1414;--c-warn:#f0a860;--c-accent-soft:#243447;--c-hl-fill:rgba(91,159,230,.16);--c-hl-inner:rgba(255,255,255,.35);--c-hl-ring:rgba(91,159,230,.28);--c-focus-ring:rgba(91,159,230,.5);--c-scrim:rgba(0,0,0,.72);--c-tip-bg:rgba(0,0,0,.88);--c-tip-text:#fff;--c-placeholder:#9a9a9a;--c-btn-disabled-bg:#2f2f2f;--c-btn-disabled-text:#9a9a9a;--c-brand-fs:#5b95ff;--c-brand-obs:#a78bfa;--sh-float:0 4px 12px rgba(0,0,0,.45);--sh-modal:0 24px 48px rgba(0,0,0,.55),0 4px 12px rgba(0,0,0,.35);--dur-fast:.15s;--dur-base:.2s;--ease:cubic-bezier(.2,0,.2,1)`;
  const PANEL_CSS = `:host{all:initial;color-scheme:light dark;--c-bg:#fff;--c-text:#333;--c-text-sec:#555;--c-border:#ddd;--c-border-hover:#bfbfbf;--c-input-bg:#fff;--c-bg-sec:#f0f0f0;--c-pv-bg:#fafafa;--c-pv-text:#333;--c-pv-border:#eee;--c-code-bg:#f0f0f0;--c-th-bg:#e8e8e8;--c-td-border:#ccc;--c-btn-sec-bg:#f0f0f0;--c-btn-sec-text:#333;--c-btn-ghost-bg:#fff;--c-btn-ghost-text:#1667bb;--c-btn-ghost-border:#2383e2;--c-help:#6f6f6f;--c-kbd-bg:#f0f0f0;--c-kbd-border:#ccc;--c-progress-bg:#eee;--c-err-bg:#fff5f5;--c-err-border:#ffcdd2;--c-err-text:#d32f2f;--c-err-succ-bg:#f1f8e9;--c-err-succ-border:#c8e6c9;--c-err-succ-text:#2d7d46;--c-accent:#2383e2;--c-accent-hover:#1b6ec2;--c-accent-strong:#1b6ec2;--c-accent-ink:#1667bb;--c-toast-info:#b45309;--c-ring:rgba(27,110,194,.16);--c-success:#2d7d46;--c-success-solid:#2d7d46;--c-danger:#d32f2f;--c-danger-solid:#c62828;--c-danger-solid-hover:#b71c1c;--c-warn:#b45309;--c-accent-soft:#eaf2fb;--c-hl-fill:rgba(35,131,226,.1);--c-hl-inner:rgba(255,255,255,.6);--c-hl-ring:rgba(35,131,226,.22);--c-focus-ring:rgba(35,131,226,.45);--c-scrim:rgba(0,0,0,.6);--c-tip-bg:rgba(0,0,0,.85);--c-tip-text:#fff;--c-placeholder:#767676;--c-btn-disabled-bg:#f0f0f0;--c-btn-disabled-text:#555;--c-brand-fs:#2c62e0;--c-brand-obs:#7c3aed;--sh-float:0 4px 12px rgba(0,0,0,.15);--sh-modal:0 24px 48px rgba(15,23,42,.16),0 4px 12px rgba(15,23,42,.08);--dur-fast:.15s;--dur-base:.2s;--ease:cubic-bezier(.2,0,.2,1)}
 :host{--font-sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono","Courier New",monospace;--r-xs:3px;--r-sm:4px;--r-md:6px;--r-lg:8px;--r-xl:12px;--r-2xl:16px;--r-full:999px;--sp-1:4px;--sp-2:6px;--sp-3:8px;--sp-4:12px;--sp-5:16px;--sp-6:20px;--sp-7:28px;--fs-xs:11px;--fs-sm:12px;--fs-base:13px;--fs-md:14px;--fs-lg:16px;--fs-xl:18px;--lh-tight:1.35;--lh-base:1.55;--sh-pop:0 8px 24px rgba(0,0,0,.18);--sh-hi:0 12px 28px rgba(15,23,42,.22);--sh-inset-t:inset 0 1px 0 rgba(255,255,255,.6);--dur-slow:.3s;--ease-out:cubic-bezier(.16,1,.3,1);--ease-spring:cubic-bezier(.34,1.4,.64,1);--c-scrollbar:#cfcfcf;--c-scrollbar-hover:#b0b0b0;--c-surface-sunken:#fafafa;--c-badge-on-bg:#eaf2fb;--c-badge-on-text:#1667bb;--c-badge-off-bg:#f0f0f0;--c-badge-off-text:#767676;--c-toast-shadow:0 6px 20px rgba(15,23,42,.2)}
@@ -964,9 +899,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 :host([data-theme=dark]){${DARK_VARS}}
 :host([data-theme=dark]) .nc-b1{color:#0d2137}
 `;
-
  const PANEL_HTML = `
-
 <button class="nc-btn" type="button" title="左键选取 · 右键设置 · Alt+Shift+N" aria-label="网页剪藏：左键选取，右键打开设置，快捷键 Alt+Shift+N">
 <svg class="nc-btn-ico" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>
 <span class="nc-btn-badge" id="btn-badge" aria-hidden="true" hidden></span>
@@ -1111,26 +1044,16 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
  <div class="nc-row"><button class="nc-b nc-b2" id="ask-no">取消</button><button class="nc-b nc-b1" id="ask-yes">确定</button></div>
 </div></div>
 <div class="nc-tc" id="tc" role="status" aria-live="polite" aria-atomic="false"></div>`;
-
- // ===== 主初始化 =====
  function ncInit() {
   if (isSensitiveHost(location.hostname)) return;
   if (isUserBlocked(location.hostname, S.blocklist)) return;
-
   const old = document.getElementById('nc-host'); if (old) old.remove();
   const host = document.createElement('div'); host.id = 'nc-host';
   host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;';
   document.body.appendChild(host);
-
   const shadow = host.attachShadow({ mode: 'closed' });
   const ac = new AbortController(); const signal = ac.signal;
   _cleanupFns.push(() => ac.abort());
-
-  // host 判定必须「精确匹配或子域」，不能用 includes。
-  // 原 `includes('zhihu.com')` 会把 evilzhihu.com、zhihu.com.evil.com 一并判为知乎，
-  // 从而在非知乎页面上执行知乎专属清洗（按 ZHIHU_REMOVE 删节点、按 isZhihuMember 拦图片），
-  // 剪藏结果被无声破坏且无从察觉；isTwitter 的 includes('x.com') 更宽——
-  // ox.com、x.company.com、x.com.evil.com 全部命中，会走 Twitter 会话解析。
   const hostIs = (base) => {
    const h = String(location.hostname || '').toLowerCase();
    return h === base || h.endsWith('.' + base);
@@ -1139,23 +1062,16 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   const isTwitter = hostIs('x.com') || hostIs('twitter.com');
   const isTwitterStatus = () => isTwitter && location.pathname.includes('/status/');
   const $ = (s, b = shadow) => b.querySelector(s);
-
   const pageTitle = () => {
    const og = document.querySelector('meta[property="og:title"]')?.content?.trim();
    return og || document.title || '';
   };
-
-  // ---------- 样式 ----------
   const style = document.createElement('style');
   style.textContent = PANEL_CSS;
   shadow.appendChild(style);
-
-  // ---------- UI 模板 ----------
   const ui = document.createElement('div');
   ui.innerHTML = PANEL_HTML;
   shadow.appendChild(ui);
-
-  // ---------- 元素引用 ----------
   const el = {
    btn: $('.nc-btn'), tip: $('.nc-tip'), mask: $('.nc-mask'), hl: $('.nc-hl'),
    ovSet: $('#ov-set'), ovCfm: $('#ov-cfm'), ovOk: $('#ov-ok'), ovErr: $('#ov-err'),
@@ -1181,21 +1097,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    btnBadge: $('#btn-badge'), theme: $('#in-theme'),
    setNav: $('#set-nav'), setPanes: $('#set-panes'),
    ovAsk: $('#ov-ask'), askTitle: $('#ask-title'), askMsg: $('#ask-msg'), askYes: $('#ask-yes'), askNo: $('#ask-no'),
-   // v5.20.0：取消按钮原先只以 $('#btn-cc') 就地取用，改成进表，供 setSendingUI 统一管控。
    cc: $('#btn-cc'),
-   // v5.20.0：分平台进度行容器与「去设置修凭据」入口。
    pgList: $('#pg-list'), errGotoSet: $('#btn-err-set'),
-   // v5.20.0：完成面板倒计时条，与「N 秒后自动关闭」文案同源
    okTimer: $('#ok-timer'), okTimerFill: $('#ok-timer-fill'),
   };
-
-  // ---------- 发送目标徽章 ----------
-  // 仅做只读呈现 + 跳转到设置，不参与 sendToAll 的平台判定（判定仍以 refreshSettings 后的 S 为准），
-  // 避免两处真相源；关闭设置时重绘即可同步用户在设置里的改动。
-  // 两个正交维度：enabled=开关是否打开，configured=凭据是否齐全；ready=两者皆真。
-  // 三平台口径统一为「能否发送成功」。注意这与 sendToAll 有意不同——后者对 Obsidian 只判开关
-  // （勾了就会尝试发送，缺 Key 则在发送时报连接失败）。指示灯回答的是「能不能发成功」，
-  // 而非「会不会尝试」，否则「勾了但没填 Key」这种最该提醒的场景将永远显示绿灯。
   const PLAT_BADGES = [
    { key: 'notion', label: 'Notion',
     enabled: () => isNotionEnabled(), configured: () => isNotionConfigured(),
@@ -1207,9 +1112,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     enabled: () => isObsidianEnabled(), configured: () => isObsidianConfigured(),
     sec: () => el.secObsidian, box: () => el.ckObsidian, cfgLive: () => !!el.obsApiKey.value.trim() },
   ];
-  // v5.19.0：指示灯节点在面板 DOM 构建后即固定不变，原实现每次 syncSectionState 都重新
-  // 拼一次选择器字符串并做两次 querySelector——而凭据输入框每次按键都会触发它。
-  // 一次性解析后挂到平台对象上，syncSectionState 退化为纯 class 切换。
   for (const p of PLAT_BADGES) {
    p.ready = () => p.enabled() && p.configured();
    p.navDot = el.setNav.querySelector(`.nc-nav-i[data-tab="${p.key}"] .nc-dot`);
@@ -1231,9 +1133,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     el.platBadges.appendChild(b);
    }
   }
-  // 三态指示灯：on=开关已开且凭据齐全；warn=开关已开但凭据不全；off=未启用。
-  // 设置面板打开时读表单实时值（勾掉开关立刻灯灭，清空凭据立刻转 warn，无需先保存），
-  // 关闭后读已落盘的 enabled / configured——两条分支口径一致，不会同一状态两副面孔。
   const platStatus = (p) => {
    if (ovVisible(el.ovSet)) {
     if (!p.box().checked) return 'off';
@@ -1247,7 +1146,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const st = platStatus(p);
     const sec = p.sec();
     if (sec) { sec.classList.toggle('on', st === 'on'); sec.classList.toggle('warn', st === 'warn'); }
-    // 标签栏与手风琴标题的状态点共用同一套 on / warn；窄屏收起时靠它们一眼定位到待补配置的平台
     for (const d of [p.navDot, p.hdDot]) {
      if (!d) continue;
      d.classList.toggle('on', st === 'on'); d.classList.toggle('warn', st === 'warn');
@@ -1255,15 +1153,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    syncBtnBadge();
   }
-  // 悬浮球角标：已就绪平台数；0 个时转警示态，点开前就能发现没配好。
   function syncBtnBadge() {
    if (!el.btnBadge) return;
    const n = PLAT_BADGES.filter((p) => p.ready()).length;
    const warn = n === 0;
    el.btnBadge.hidden = false;
    el.btnBadge.textContent = warn ? '!' : String(n);
-   // 有平台已启用但凭据不全时同样转警示色——数字照常显示，但颜色提醒「有平台待补」，
-   // 比一律显示绿灯、等发送失败才发现要诚实。
    const broken = PLAT_BADGES.filter((p) => !p.ready() && p.enabled()).map((p) => p.label);
    el.btnBadge.classList.toggle('is-warn', warn || broken.length > 0);
    const labels = PLAT_BADGES.filter((p) => p.ready()).map((p) => p.label).join('、');
@@ -1276,10 +1171,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const b = e.target.closest ? e.target.closest('.nc-plat') : null;
    openSettings(b && b.dataset.plat);
   }, { signal });
-
-  // ---------- 设置面板分区导航 ----------
-  // 桌面端左侧标签栏 + 右侧内容区；≤600px 由 CSS 降级为手风琴。同一份 DOM，
-  // JS 只维护 active（标签选中）与 open（手风琴展开）两个状态，不感知当前断点。
   const SET_TABS = ['general', 'notion', 'feishu', 'obsidian', 'tags', 'backup', 'hist', 'keys'];
   let activeTab = SET_TABS[0];
   function switchTab(key) {
@@ -1303,7 +1194,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const nav = e.target.closest ? e.target.closest('.nc-nav-i') : null;
    if (nav) switchTab(nav.dataset.tab);
   }, { signal });
-  // 手风琴：点击已展开的标题收起自身，点击其他标题切到该分区
   el.setPanes.addEventListener('click', (e) => {
    const hd = e.target.closest ? e.target.closest('.nc-pane-hd') : null;
    if (!hd) return;
@@ -1323,15 +1213,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const nav = el.setNav.querySelector(`.nc-nav-i[data-tab="${next}"]`);
    if (nav) { try { nav.focus(); } catch (err) {   } }
   }, { signal });
-
-  // ---------- 主题 ----------
-  // 手动指定时给宿主挂 data-theme，CSS 侧据此屏蔽系统深色分支（light）或独立生效（dark）
   const applyTheme = (v) => {
    const t = (v === 'light' || v === 'dark') ? v : '';
    if (t) host.setAttribute('data-theme', t); else host.removeAttribute('data-theme');
   };
-
-  // ---------- 运行时状态（按职责分组） ----------
   let selecting = false, blocks = [], hlTarget = null;
   let selCands = [], selIdx = 0, selAnchor = null;
   let appendMode = false;
@@ -1341,13 +1226,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   let cachedIcon = null;
   let confirmOpen = false;
   let sending = false;
-  // v5.20.0：本次发送的取消控制器。与 sending 分离——sending 只回答「是否有发送在跑」，
-  // 而 sendAc 回答「这一次能不能被停止」，每次 doSend/doRetry 都会换一个新的。
   let sendAc = null;
-  // v5.20.0：最近一次发送的结构化错误列表。「复制错误」从这份数据源序列化，
-  // 而不是从面板 textContent 里读——后者在长文本折叠时只能拿到被截断的可见部分。
   let lastErrors = [];
-  // v5.20.0：Map<平台key, 展示文案>。原先是数组，重试成功会重复 push 同一平台。
   let accSuccess = new Map();
   let cachedSend = null, lastNotionPageId = null, lastFeishuDocId = null, okAutoCloseTimer = null;
   let notionDbCache = { dbId: '', props: null };
@@ -1355,19 +1235,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   const imgFailTs = new Map();
   let settingsDirty = false, settingsListenersAttached = false;
   let modeAc = null;
-  // 清理钩子：重注入时旧实例的 __ncCleanup 会 abort 旧 modeAc，连带移除旧 signal 上的监听器；
-  // body 十字线光标位于 shadow 之外，host 移除不会覆盖它，须随清理一并复位
   _cleanupFns.push(() => {
    try { modeAc && modeAc.abort(); } catch (e) {   }
    if (selecting) { try { document.body.style.cursor = ''; } catch (e) {   } }
   });
-
   const isOwn = (node) => { let n = node; while (n) { if (n === host) return true; n = n.parentNode || n.host; } return false; };
-
-  // 段落块是否含非空文本——parseBlocks 过滤与知乎评论 body 判定共用同一谓词
   const paraHasText = (b) => (b?.paragraph?.rich_text || []).some(t => (t.text?.content || '').trim());
-
-  // ---------- Toast / 剪贴板 ----------
   function toast(msg, type = 'success', ms) {
    while (el.toast.children.length >= C.TOAST_MAX) { const old = el.toast.firstChild; clearTimeout(old._ncTimer); old.remove(); }
    const t = document.createElement('div');
@@ -1388,9 +1261,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (win) { try { win.opener = null; } catch {   } return; }
    copyText(url, '📋 链接已复制（弹窗被阻止）');
   }
-
-  // ---------- 弹窗焦点管理 ----------
-  // 打开时聚焦首控件、Tab 在模态内循环、关闭还原焦点；仅覆盖键盘路径，不改变任何业务回调
   let lastFocusedBeforeModal = null;
   const rememberFocus = () => { lastFocusedBeforeModal = shadow.activeElement || document.activeElement; };
   const restoreFocus = () => { const n = lastFocusedBeforeModal; lastFocusedBeforeModal = null; if (n && n.isConnected && typeof n.focus === 'function') { try { n.focus(); } catch {   } } };
@@ -1404,7 +1274,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (e.shiftKey) { if (!inside || active === first) { e.preventDefault(); last.focus(); } }
    else if (!inside || active === last) { e.preventDefault(); first.focus(); }
   }
-  // 叠加弹窗按「后开先处理」顺序：ovAsk 可叠在任意面板之上，故排在最前
   function onModalTab(e) {
    if (e.key !== 'Tab') return;
    for (const ov of [el.ovAsk, el.ovSet, el.ovCfm, el.ovErr, el.ovOk]) {
@@ -1412,15 +1281,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
   }
   document.addEventListener('keydown', onModalTab, { signal, capture: true });
-
-  // ---------- 自绘确认对话框 ----------
-  // 原生 confirm() 会被部分站点的 CSP / 页面脚本拦截或改写，样式也无法跟随脚本主题，
-  // 统一改为 shadow DOM 内自绘，返回 Promise<boolean>，复用既有焦点记忆与 Tab 循环。
   let askResolve = null;
   function askConfirm(opts) {
    const o = typeof opts === 'string' ? { message: opts } : (opts || {});
    return new Promise((resolve) => {
-    // 同一时刻只允许一个未决询问；若有旧的先按取消结算，避免其 Promise 永久悬挂
     if (askResolve) { const prev = askResolve; askResolve = null; prev(false); }
     el.askTitle.textContent = o.title || '请确认';
     el.askMsg.textContent = o.message || '';
@@ -1442,11 +1306,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   }
   el.askYes.addEventListener('click', () => closeAsk(true), { signal });
   el.askNo.addEventListener('click', () => closeAsk(false), { signal });
-  // 仅当点击落在遮罩本身才视为取消，避免面板内点击冒泡误触发
   el.ovAsk.addEventListener('click', (e) => { if (e.target === el.ovAsk) closeAsk(false); }, { signal });
   _cleanupFns.push(() => { if (askResolve) { const r = askResolve; askResolve = null; r(false); } });
-
-  // ---------- 平台启用/配置判定 ----------
   const isNotionConfigured = () => !!(S.notionToken && S.notionDbId);
   const isFeishuConfigured = () => !!(S.fsAppId && S.fsAppSecret);
   const isObsidianConfigured = () => !!String(S.obsApiKey || '').trim();
@@ -1454,14 +1315,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   const isNotionEnabled = () => getPlatformEnabled(S.enableNotion, isNotionConfigured());
   const isFeishuEnabled = () => getPlatformEnabled(S.enableFeishu, isFeishuConfigured());
   const isObsidianEnabled = () => getPlatformEnabled(S.enableObsidian, isObsidianConfigured());
-
-  // ---------- 进度条 ----------
-  // 进度条冗余写守卫——sendToAll 多平台并发回调逐次写 width/textContent，
-  // 值未变时跳过 DOM 写（签名短路，行为等价；show/hideProgress 复位签名保证状态切换必写）。
   let lastPgW = '0%', lastPgT;
-  // v5.20.0：分平台逐行进度。总进度条是各平台进度的加权平均，天然无法暴露
-  // 「A 已完成而 B 卡在 20%」这类信息——而这恰是多平台并发时最需要被看见的。
-  // 每个启用平台独占一行，行内独立推进宽度与状态，终态（完成/失败/已停止）由 markRow 标记。
   const PG_STATE = { pending: '等待中', running: '发送中', done: '完成', error: '失败', stopped: '已停止' };
   let pgRows = null;
   const buildProgressRows = (active) => {
@@ -1497,17 +1351,11 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    return rows;
   };
   const resetProgress = (display, active) => {
-   // v5.22.0：display 必须归一化成具体值。CSS 里 .nc-progress 默认 display:none（见 PANEL_CSS），
-   // 而 showProgress 传的是 ''（语义是「显示」）——赋 '' 只是删掉内联声明、回落回 CSS 的 none，
-   // 于是 v5.20.0 起总进度条全程不可见；分平台行却正常，因为 .nc-pg-list 默认 display:flex。
-   // 同一套口径两种默认值是根因，这里统一收敛为显式 block/none，不再依赖 CSS 默认值。
    const disp = display === 'none' ? 'none' : 'block';
    el.pg.style.display = disp;
    el.pg.setAttribute('aria-valuenow', '0');
    el.pgBar.style.width = '0'; lastPgW = '0%';
    el.pgText.style.display = 'none'; lastPgT = undefined;
-   // 每次重建而非复用：启用平台集合会随设置变化，行集合必须与之一致，
-   // 复用缓存容易留下「上次的平台行」这类幽灵状态。
    pgRows = buildProgressRows(active || []);
    if (el.pgList) el.pgList.style.display = pgRows && pgRows.size ? disp : 'none';
   };
@@ -1518,7 +1366,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (w !== lastPgW) { el.pgBar.style.width = w; el.pg.setAttribute('aria-valuenow', String(v)); lastPgW = w; }
    if (text && text !== lastPgT) { el.pgText.style.display = ''; el.pgText.textContent = text; lastPgT = text; }
   };
-  // 单行推进：宽度与状态都做值变才写的守卫，与总进度条口径一致。
   const bumpRow = (name, pct, txt) => {
    const r = pgRows && pgRows.get(name);
    if (!r) return;
@@ -1530,11 +1377,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     r.row.classList.toggle('is-run', st === PG_STATE.running);
     r.row.classList.toggle('is-done', st === PG_STATE.done);
    }
-   // 具体阶段（「上传图片 3/12」等）放 title，行内保持短状态，避免长文本挤压布局
    if (txt) r.state.title = txt;
   };
-  // 终态标记：done 补满 100%，error / stopped 改色并停在断点百分比上——
-  // 停在断点是有意的，用户可据此判断「已写入多少」再决定是否从断点重试。
   const markRow = (name, kind) => {
    const r = pgRows && pgRows.get(name);
    if (!r) return;
@@ -1547,22 +1391,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (kind === 'done') { r.fill.style.width = '100%'; r.lastW = '100%'; }
   };
   const hideProgress = () => resetProgress('none', []);
-
-  // ---------- 发送中 UI 守卫（v5.20.0）----------
-  // 此前发送中的禁用逻辑是散落的：平台徽章点击有 `if (sending) return`（1202 附近），
-  // 而「重选 / 追加」却没有——发送中点它们会 closeConfirm 并清空 blocks，
-  // 让后台还在跑的发送失去数据源，结果面板又会砸回选取模式上。
-  // 收敛为单一开关，以后新增按钮只需登记到这张表里，不会再漏。
-  // 注意「复制 / 复制 MD / 展开预览」刻意保持可用：它们是纯读或纯视觉操作，
-  // 发送体已经在 doSend 里 slice() 快照过，读取当前内容不会造成任何不一致。
   const SENDING_LOCKS = [
-   // 会丢弃 blocks / 重置选取，与后台发送直接冲突
    { node: () => el.back, prop: 'disabled' },
    { node: () => el.btnAdd, prop: 'disabled' },
-   // 最小化后 CSS 会 `h2 ~ *{display:none}` 把进度一起藏掉，发送中禁止
    { node: () => el.btnMin, prop: 'disabled' },
-   // 发送体已快照，改输入框无效，只会误导用户以为改生效了；用 readOnly 而非 disabled，
-   // 保持可聚焦、可选中复制（disabled 会让内容无法选中，对长标题不友好）
    { node: () => el.title, prop: 'readOnly' },
    { node: () => el.tags, prop: 'readOnly' },
   ];
@@ -1571,21 +1403,13 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const n = lock.node();
     if (n) n[lock.prop] = !!on;
    }
-   // 取消按钮在发送中改作「停止发送」，文案与语义一起切换，避免用户以为点了没反应
    if (el.cc) {
     el.cc.textContent = on ? '停止发送' : '取消';
     el.cc.title = on ? '停止本次发送（已写入的内容会保留，可稍后从断点继续）' : '关闭，不发送';
-    // v5.22.0：el.cc 刻意不进 SENDING_LOCKS——它发送全程都必须可点，否则无法触发停止。
-    // 但 requestStopSend 会把它在停止窗口内置为 disabled（防重复点击），而这张表管不到它，
-    // 于是「正在停止…」之后再无人解锁：重试打开确认面板时「取消」是灰的，只剩 Esc 能退出。
-    // 补上无条件解锁，顺带也清掉上一轮遗留的禁用态。
     el.cc.disabled = false;
    }
-   // 徽章点击本身已有 sending 守卫，这里补视觉降饱和，让「点不动」是看得见的
    if (el.platBadges) el.platBadges.classList.toggle('is-locked', !!on);
   };
-
-  // ===== 媒体资源探测 =====
   function realImgSrc(img) {
    if (!img) return null;
    const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset');
@@ -1616,9 +1440,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    return false;
   };
-  // 廉价判定（className / src 正则、祖先 class）前置，昂贵的 getBoundingClientRect() 延后。
-  // 该函数在 removeAvatarImgs / walk 中按图片循环调用，原先每张图片必触发一次尺寸读取——
-  // 页面布局脏时即为强制同步回流（布局抖动），批量图片下开销显著。各命中条件为「或」语义，重排不改变结果。
   function isAvatar(img) {
    if (!img) return true;
    const src = img.src || img.getAttribute('data-src') || '';
@@ -1690,12 +1511,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    return l;
   }
-
-  // ===== 页面内容解析为块 =====
-  // v5.19.0：annot 对象由 mergeAnnot 按「父标注 + 当前标签」派生，同一父节点下的所有子片段
-  // 共享同一个对象引用。故按对象身份缓存序列化结果即可——原实现对每个片段各做一次
-  // JSON.stringify，同一份标注被反复序列化：行内格式密集的段落（大量 <code>/<strong>/<a>）
-  // 上片段数可达数百，这是解析阶段最重的一处重复计算。WeakMap 不阻止 annot 被回收。
   const _annotKeyCache = new WeakMap();
   const annotKey = (a) => {
    let k = _annotKeyCache.get(a);
@@ -1710,8 +1525,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     let p = pre.parentElement;
     while (p && p !== fragment && p.nodeType === Node.ELEMENT_NODE) { preHosts.add(p); p = p.parentElement; }
    }
-   // 相邻同 link + annotations 的片段合并为一个 rich_text item——逐 frag 建项，
-   // 高格式段落（大量行内代码/加粗）易触 RT_ITEMS_MAX=100 被 capRT 截断丢内容；合并后渲染结果不变。
    function fragsToRT(list) {
     const rt = [];
     const bufArr = [];
@@ -1734,9 +1547,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     return capRT(rt);
    }
     function takeRich() {
-     // v5.23.0：BR 推入的是裸 '\n'，trim 后为空会被当空片段丢掉，段内换行全部丢失；
-     // 而下面的 appendRTText 又在刻意保留 '\n'，两者口径自相矛盾（诗、地址、签名档、代码块前的
-     // 多行文本都会受影响）。改为显式保留换行片段，并削掉首尾多余的换行避免段落以空行起止。
      const nonEmpty = frags.filter(f => f.text.trim() || f.text === '\n');
      while (nonEmpty.length && nonEmpty[0].text === '\n') nonEmpty.shift();
      while (nonEmpty.length && nonEmpty[nonEmpty.length - 1].text === '\n') nonEmpty.pop();
@@ -1751,9 +1561,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const savedRes = result, savedFrags = frags;
     result = []; frags = [];
     const nestedLists = [];
-    // v5.19.0 修复：原实现在此把 walk 的深度计数重置为 0，
-    // 使 WALK_DEPTH_MAX 对「列表项内的深层嵌套」完全失效（每层列表项都能再递归 60 层），
-    // 深嵌套 DOM（如多层 div 包裹的富文本编辑器产物）可撑爆调用栈。改为接续外层深度。
     for (const c of li.childNodes) {
      if (c.nodeType === Node.ELEMENT_NODE && (c.tagName === 'UL' || c.tagName === 'OL')) nestedLists.push(c);
      else walk(c, null, depth + 1);
@@ -1830,11 +1637,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     if (tag === 'A') {
      const href = safeURL(node.href) || safeURL(node.getAttribute('href') || '');
       const text = innerText(node);
-      // v5.23.0：innerText 对「链接里只包着图片/视频」返回空串，而原实现此处无条件 return，
-      // 于是 <a href><img></a> 里的媒体被整块丢弃——WordPress 图库、知乎、公众号、灯箱组件
-      // 普遍用这种结构，等于这些页面的配图全没了。有文本时才收进富文本并返回；
-      // 无文本时不 return，落回下面的 INLINE_TAGS 分支继续遍历子节点（A 在其中），
-      // 让里面的 IMG/VIDEO/IFRAME 各自成块。代价只是图片块不再携带链接，Notion/飞书亦不支持。
       if (text) { frags.push({ text, link: href || null, annot: parentAnnot }); return; }
      }
     if (INLINE_TAGS.has(tag)) {
@@ -1878,10 +1680,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     }
     if (tag === 'PRE') { flush(); result.push(mkCode(node.textContent || '', detectLang(node))); return; }
      if (tag === 'DIV' && preHosts.has(node) && !node.querySelector('p,h1,h2,h3,h4,h5,h6,blockquote,ul,ol,details,article,section')) {
-      // v5.23.0：原实现取第一个 pre 就 return，而这个守卫只排除了 p/h1-6/blockquote/ul/ol/
-      // details/article/section——div 内还有第二段代码、表格、图片或纯文本时会全部静默丢失。
-      // 只有当「div 的全部文本恰好等于那唯一一个 pre 的文本、且不含表格/图片等其它媒体」时
-      // 才走这条快路径；否则落回下面的通用分支逐子节点处理（PRE 分支会各自成块，table/img 也不丢）。
       const pres = node.querySelectorAll('pre');
       const onlyPre = pres.length === 1 && !node.querySelector('img,table,video,svg,canvas,figure,blockquote')
        && innerText(node).replace(/\s+/g, '') === (pres[0].textContent || '').replace(/\s+/g, '');
@@ -1909,19 +1707,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      return b;
     });
   }
-
-  // ===== 知乎页面适配 =====
-  // 向内候选：findTarget 在知乎上通常命中最外层的 .AnswerItem / .ContentItem，
-  // 而 buildCandidates 原先只从 best 向上收集祖先——候选序列恒为「best 最小、越往后越大」，
-  // ↓ 键（索引减一）因此永远被 clamp 在 0，是个死键：点了正文段落选中整张回答卡后无法再缩小。
-  // 这里登记 best 内部更精确的正文容器，由 buildCandidates 插到 best 之前，让 ↓ 真正可用。
-  // 只用脚本里已验证过的类名，不引入未经实测的新选择器。
   const ZHIHU_INNER_CANDIDATES = ['.RichText', '.Post-RichTextContainer', '[itemprop="text"]', '.QuestionAnswer-content', '.RichContent-inner'];
   const removeAvatarImgs = (root) => root.querySelectorAll('img').forEach(img => { if (isAvatar(img) || isZhihuMember(img)) img.remove(); });
   function cleanZhihu(clone) { clone.querySelectorAll(ZHIHU_REMOVE).forEach(n => n.remove()); removeAvatarImgs(clone); return clone; }
   function zhihuAuthor(root) {
-   // 原先 root.closest('.AnswerItem') 写在循环体内，8 条选择器就要向上遍历 8 次；
-   // 同一个 root 的结果恒定，外提为一次性计算。
    const card = root.closest?.('.AnswerItem') || null;
    for (const s of ['.UserLink', '.AuthorInfo-name', '.AnswerItem-authorInfo .UserLink', '.ContentItem-authorInfo .UserLink', '.Post-Author .UserLink', '.AuthorInfo .UserLink', '.AnswerItem-authorInfo a[href*="/people/"]', '.ContentItem-authorInfo a[href*="/people/"]']) {
     const found = root.querySelector(s) || card?.querySelector(s);
@@ -1946,9 +1735,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    return null;
   }
   function zhihuSourceURL(root) {
-   // 原先只在 root 内部向下查：选中正文（.RichText / .RichContent-inner）时问题标题在
-   // root 之上，querySelector 拿不到，只能退化成用 location.pathname 拼问题链接——
-   // 在专栏、回答聚合页上拼出来的链接是错的。改为先向上定位卡片容器再查。
    const card = root.closest?.('.ContentItem') || root.closest?.('.Card') || root.closest?.('[itemprop="suggestedAnswer"]') || root.closest?.('.AnswerItem');
    for (const scope of [root, card]) {
     if (!scope?.querySelector) continue;
@@ -1959,10 +1745,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (m) return `https://www.zhihu.com/question/${m[1]}`;
    return safeURL(location.href);
   }
-  // 折叠检测：知乎长回答默认只渲染截断版正文，靠 .ContentItem-more（「阅读全文」）手动展开。
-  // 此时直接提取会静默丢掉后半篇——产出看起来正常但内容不全，是最难发现的一类缺陷。
-  // 只检测并提示，不自动点击：展开会触发懒加载、改变页面滚动位置，属于用户决策。
-  // 必须在 live DOM（target）上检测，clone 已被 cleanZhihu 按 ZHIHU_REMOVE 删掉该按钮。
   function zhihuFolded(root) {
    const card = root.closest?.('.ContentItem') || root.closest?.('.AnswerItem') || root.closest?.('.Card');
    for (const s of [root, card]) {
@@ -1971,7 +1753,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      if (/阅读全文|展开全文|显示全部|查看全部/.test((n.textContent || '').replace(/\s+/g, ''))) return true;
     }
    }
-   // 兜底：新版知乎用 .RichContent-inner 显式限高表示折叠，此时未必还有文字按钮
    const inner = root.querySelector?.('.RichContent-inner') || card?.querySelector?.('.RichContent-inner');
    if (inner) {
     const mh = parseFloat(inner.style?.maxHeight || '');
@@ -2093,8 +1874,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    out.push(...bullets);
    return out;
   }
-
-  // ===== X(Twitter) 页面适配 =====
   const upgradeTwImg = (u) => {
    if (!u) return u;
    if (/[?&]name=(small|medium|large|360x360|900x900)\b/i.test(u)) return u.replace(/([?&])name=(?:small|medium|large|360x360|900x900)\b/i, '$1name=orig');
@@ -2120,8 +1899,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     let got = false;
     for (const s of vp.querySelectorAll('source')) {
      const u = normOrSafe(s.src);
-     // v5.23.0：break 必须只在「成功产出块」时执行。旧版 break 写在 if (u) 块末尾，
-     // 首个 source 被 mkMedia 拒绝（不支持的扩展名 / 超限）时不再尝试后续 source，视频直接丢失。
      if (u) { const b = mkMedia('video', u); if (b && !seen.has(u)) { seen.add(u); out.push(b); got = true; break; } }
     }
     if (!got && video.poster) pushImg(video.poster);
@@ -2194,9 +1971,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    return out.length ? out : null;
   }
-  // v5.19.0：原实现用 getElementsByTagName('*').length 计数——它是 live 集合，取 length 必须
-  // 遍历完整棵子树才能得出结果，而判定只需要知道「是否越过上限」。改为 TreeWalker 边走边数并在
-  // 越过 limit 时立即返回：整页选取（数万节点）场景从 O(n) 降为 O(limit)，正常场景开销相当。
   function countElements(root, limit) {
    const tw = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
    let n = 0;
@@ -2212,10 +1986,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    return target.cloneNode(true);
   }
-
-  // ---------- 内容提取入口 ----------
-  // 克隆体先挂到离屏 DocumentFragment 再交给 parseBlocks——直接传游离节点可安全遍历，但
-  // 统一入口后 5 处调用点不再各自重复 createDocumentFragment + appendChild 三连。
   const blocksFromClone = (node, depth) => { const frag = document.createDocumentFragment(); frag.appendChild(node); return parseBlocks(frag, depth); };
   function extractBlocks(target, opts) {
    const title = pageTitle();
@@ -2237,10 +2007,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     if (article) return { blocks: [twAuthorHeader(article), ...twTextBlocks(article), ...twMediaBlocks(article)], title };
    }
    if (isZhihu && target.matches && (target.matches(ZHIHU_REPLY_ITEM) || target.matches(ZHIHU_COMMENT_ITEM) || target.matches(ZHIHU_COMMENT_BOX))) {
-    // 命中评论区选择器后必须走专用解析并就此收敛：评论区 DOM 里塞满投票按钮、
-    // 时间戳、头像、「查看回复」等交互件，通用克隆会把它们当成正文，产出不可用的垃圾块。
-    // 解析为空说明「该评论区此刻确实没有可提取的评论」，不是「换条路再试一次」，
-    // 因此不再 fall through，改为回传 hint 让上层给出可操作提示。
     const cb = zhihuComments(target);
     return { blocks: cb, title, hint: cb.length ? '' : '该评论区未解析出评论，请先展开评论或改用整卡选取' };
    }
@@ -2265,9 +2031,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   function findTarget(node) {
    if (!node || node === document.body || node === document.documentElement || isOwn(node)) return null;
    const tag = node.tagName;
-    // v5.23.0：媒体元素取不到可用 src 时（懒加载占位 <img>、srcdoc / 空 src 的 iframe、
-    // 尚未加载的 <video>），原实现直接 return null，整块区域既无高亮也无法选中，
-    // 而它的父容器往往正是好目标。改为落回下面的祖先回溯，由父容器接管。
     if (tag === 'IMG') { if (!isAvatar(node) && !isZhihuMember(node) && realImgSrc(node)) return node; }
     else if (tag === 'VIDEO') { if (videoSrc(node)) return node; }
     else if (tag === 'IFRAME') { if (normOrSafe(node.src)) return node; }
@@ -2304,16 +2067,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const id = elm.id ? '#' + elm.id : '';
    return tag + (id ? id : cls ? '.' + cls : '');
   }
-
-  // ===== 选取候选与范围 =====
   const rectArea = (n) => { const r = n.getBoundingClientRect(); return r.width * r.height; };
-  // 返回 { cands, defaultIdx }：cands 由小到大（索引越大范围越大，与 ↑ 增大 / ↓ 减小的
-  // 键位语义一致），defaultIdx 指向 best 本身。
-  // 原先只返回数组且默认选 cands[0]——引入向内候选后 best 不再位于索引 0，
-  // 若仍固定取 0 会让默认选中范围变成最小的正文，改变既有习惯。
   function buildCandidates(best) {
-   // 向内候选：best 内部的正文容器比 best 小，排在 best 之前，使 ↓ 能缩小范围。
-   // 非知乎站点 ZHIHU_INNER_CANDIDATES 不生效，行为与原先完全一致。
    const inner = [];
    if (isZhihu && best?.querySelectorAll) {
     const bestArea = rectArea(best);
@@ -2323,15 +2078,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      for (const n of best.querySelectorAll(s)) {
       if (seen.has(n)) continue;
       const r = n.getBoundingClientRect();
-      // 尺寸下限过滤空容器；面积上限剔除溢出父元素的异常布局（罕见但会让候选序错乱）
       if (r.width > 50 && r.height > 50 && r.width * r.height < bestArea * 0.98) {
        seen.add(n);
        measured.push({ node: n, area: r.width * r.height });
       }
      }
     }
-    // 先按面积降序取最大的两级（最接近 best 的层级最有缩小价值），再反转成升序，
-    // 保证「索引越大范围越大」：… → 较小的正文 → 较大的内容区 → best → 祖先 …
     measured.sort((a, b) => b.area - a.area);
     for (const m of measured.slice(0, 2).reverse()) inner.push(m.node);
    }
@@ -2346,14 +2098,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    return { cands, defaultIdx: inner.length };
   }
-  // 选取提示变更检测——每次鼠标帧回调都重写 el.tip.textContent，
-  // 同一目标上移动鼠标时为纯冗余 DOM 写入；签名（元素描述+索引+候选数）未变时跳过。
-  // positionHL 仍每帧执行（元素位置可能随页面变化），仅文本写入被短路。
-  // 元素描述串随候选集重建时缓存（selDesc），签名比对不再逐帧 describeElement
-  // （原实现每帧对当前目标做 className split/拼接）；锚点不变时 selDesc 稳定，行为等价。
-  // v5.21.0：候选已可向内缩小，当前目标不再恒等于锚点，描述必须跟随 selIdx；
-  // 用 selDescIdx 守卫把重算限定在「索引真的变了」时（按键是低频操作），
-  // 而不是每帧一次，以保住上面这条优化。
   let tipSig = '', selDesc = '', selDescIdx = -1;
   function applySelection() {
    const t = selCands[selIdx];
@@ -2367,8 +2111,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     el.tip.textContent = `🔍 ${selDesc} — 单击提取 · ↑↓ 调整范围 (${selIdx + 1}/${selCands.length})`;
    }
   }
-
-  // ===== 悬浮球位置与拖拽 =====
   const clampPos = (l, t) => ({ left: Math.max(0, Math.min(l, innerWidth - C.BTN_SIZE)), top: Math.max(0, Math.min(t, innerHeight - C.BTN_SIZE)) });
   function fullFromHidden(edge, l, t) {
    if (edge === 'left') l = 0; if (edge === 'right') l = innerWidth - C.BTN_SIZE;
@@ -2382,9 +2124,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (edge === 'bottom') t = innerHeight - C.VISIBLE_PART;
    return { left: l, top: t };
   }
-  // right / bottom 写一次即可——拖拽期间 mousemove 以 ~60Hz 调用 applyPos，
-  // 原实现每次写 4 个样式属性（每次写入都使样式失效触发重算），实际 left/top 变化、right/bottom 恒为 'auto'。
-  // 写一次守卫将高频样式写入从 4 次降为 2 次。
   let btnPosAutoWritten = false;
   function applyPos(l, t) {
    const p = clampPos(l, t);
@@ -2400,8 +2139,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const fp = fullFromHidden(hiddenEdge, r.left, r.top);
    applyPos(fp.left, fp.top); showFull();
   }
-  // 悬浮球存储位置内存缓存——大图隐藏 / 恢复与窗口 resize 路径每次同步 GM_getValue × 2，
-  // 高频命中下反复跨上下文读取；缓存由 savePos/loadPos 维护，首次未缓存时才读存储，行为等价。
   let memBtnPos = null;
   function savePos() {
    const r = el.btn.getBoundingClientRect();
@@ -2429,7 +2166,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    else { applyPos(c.left, c.top); showFull(); }
   }
   function snap(l, t) {
-   // 大图隐藏期间悬浮球为 display:none，rect 读得全零——据此计算会把存储位置覆写成视口左上角并误判贴边
    if (hiddenForImg) return;
    let edge = '';
    if (l < C.SNAP_THRESHOLD) edge = 'left';
@@ -2453,16 +2189,11 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   }, { signal });
   _cleanupFns.push(() => clearTimeout(hoverTimer));
   _cleanupFns.push(() => clearTimeout(okAutoCloseTimer));
-
-  // ---------- 完成面板自动关闭倒计时 ----------
-  // 面板 10s 后自动消失，此前无任何提示，用户常以为内容未保存而重复发送；
-  // 倒计时文案与 okAutoCloseTimer 同源，任一路径关闭都会 stop。
   const OK_AUTO_CLOSE_MS = 10000;
   let okCountdownTimer = null;
   function stopOkCountdown() {
    if (okCountdownTimer) { clearInterval(okCountdownTimer); okCountdownTimer = null; }
    if (el.okTip) el.okTip.style.display = 'none';
-   // 归位而非仅隐藏：动画类留在元素上，下次倒计时会拿到已经跑完的进度
    if (el.okTimer) el.okTimer.style.display = 'none';
    if (el.okTimerFill) { el.okTimerFill.classList.remove('is-running'); el.okTimerFill.style.animationDuration = ''; }
   }
@@ -2472,8 +2203,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    let left = Math.max(1, sec | 0);
    el.okTip.style.display = '';
    el.okTip.textContent = `${left} 秒后自动关闭`;
-   // 倒计时条：reflow 强制重启动画——同一个元素连续触发同名动画时，
-   // 不读一次 offsetWidth 浏览器会认为动画未变而跳过重启。
    if (el.okTimer && el.okTimerFill) {
     el.okTimer.style.display = '';
     el.okTimerFill.style.animationDuration = `${sec}s`;
@@ -2487,13 +2216,9 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }, 1000);
   }
   _cleanupFns.push(stopOkCountdown);
-   // v5.23.0：iframe 内松手时 mouseup 不会派发到父文档（iframe 有自己的文档），
-   // 而 document.mouseleave / window.blur 也覆盖不到「指针只是移到 iframe 上并未离开窗口」的情况，
-   // dragging 会一直停在 true——此后不按键移动，悬浮球也持续跟着走，只能靠下一次点击复位。
-   // 指针捕获把后续 pointer 及兼容 mouse 事件全部重定向到悬浮球，mouseup 就一定收得到。
    el.btn.addEventListener('pointerdown', (e) => {
     if (e.button === 2) return;
-    try { el.btn.setPointerCapture(e.pointerId); } catch (_) { /* 不支持指针事件则退回原行为 */ }
+    try { el.btn.setPointerCapture(e.pointerId); } catch (_) {  }
    }, { signal });
    el.btn.addEventListener('mousedown', (e) => {
     if (e.button === 2) return;
@@ -2522,8 +2247,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    e.stopPropagation(); startPickFlow(); dragDist = 0;
   }, { signal });
   el.btn.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); openSettings(); }, { signal });
-  // 大图隐藏期间（display:none）窗口 resize 会读到全零 rect 并把悬浮球重定位到 (0,0)，故直接跳过该期间的重定位；
-  // 恢复时按当前坐标收敛到视口内即可（窗口可能在隐藏期间缩小），无需重读存储，省去 4 次 GM 读取。
   function onResize() {
    if (hiddenForImg) return;
    if (hidden) {
@@ -2542,10 +2265,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   let largeImgLastX = 0, largeImgLastY = 0;
   function onDocMouseMove(e) {
    largeImgLastX = e.clientX; largeImgLastY = e.clientY;
-   // v5.19.0：这里原有的 e.preventDefault() 是冗余的——拖拽起于悬浮球的 mousedown，
-   // 该事件已 preventDefault 阻止选区生成，且 .nc-btn 自身带 user-select:none。
-   // 去掉它即可把监听改挂 passive：非 passive 的捕获阶段 mousemove 会让浏览器
-   // 无法对该事件路径做滚动/合成优化，而这是全页常驻、触发频率最高的一个监听器。
    if (dragging) { applyPos(dragIL + e.clientX - dragSX, dragIT + e.clientY - dragSY); return; }
    if (selecting) { onHoverMove(e); return; }
    const now = Date.now();
@@ -2560,7 +2279,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      if (!hiddenForImg) { hiddenForImg = true; el.btn.style.display = 'none'; }
     } else if (hiddenForImg) {
      hiddenForImg = false; el.btn.style.display = '';
-     // 隐藏期间未改动 left / top（onResize 已跳过），恢复只需按当前坐标收敛到视口内，无需重读存储重定位。
      if (hidden) { const c = storedBtnPos(); if (c) applyHiddenAt(hiddenEdge, c.left, c.top); }
      else { const r = el.btn.getBoundingClientRect(); applyPos(r.left, r.top); }
     }
@@ -2569,17 +2287,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   function onDocMouseUp(e) { if (dragging) dragEnd(e); }
   document.addEventListener('mousemove', onDocMouseMove, { signal, capture: true, passive: true });
   document.addEventListener('mouseup', onDocMouseUp, { signal, capture: true, passive: true });
-  // 鼠标在视口外（浏览器工具栏 / 另一窗口 / 屏幕边缘）松手时，mouseup 不会派发到本页文档，
-  // dragging 会一直停在 true：此后无按键移动也会让悬浮球持续跟随鼠标（拖拽态泄漏）。
-  // window.blur 只覆盖切换窗口，补 mouseleave 覆盖「拖出视口即松手」。
   document.addEventListener('mouseleave', cancelDrag, { signal });
   window.addEventListener('blur', cancelDrag, { signal });
   _cleanupFns.push(() => { if (largeImgRafId) cancelAnimationFrame(largeImgRafId); });
   _cleanupFns.push(() => { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } });
-
-  // ===== 高亮与选取交互 =====
-  // 高亮框几何签名：选取期间 applySelection 逐帧调用 positionHL，而鼠标常驻同一元素时矩形不变，
-  // 逐帧重写 4 个样式属性纯属冗余；clearHL 复位签名以保证 display:block 下次必写。
   let hlSig = '';
   function positionHL(target) {
    const r = target.getBoundingClientRect();
@@ -2592,8 +2303,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    el.hl.style.transform = `translate(${r.left}px,${r.top}px)`;
   }
   function clearHL() { el.hl.style.display = 'none'; hlTarget = null; selAnchor = null; hlSig = ''; }
-  // 遮罩属本脚本 shadow 子树，页面侧命中测试只暴露 host，按 isOwn 过滤即得遮罩下的顶层页面元素；
-  // 替代「临时关遮罩 pointer-events 再还原」的写法，免去每次命中的两次样式写与随之而来的样式重算。
   function topPageElementAt(x, y) {
    for (const n of document.elementsFromPoint(x, y)) if (!isOwn(n)) return n;
    return null;
@@ -2611,12 +2320,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     if (best) {
      if (best !== selAnchor) {
       selAnchor = best;
-      // 默认停在 best（defaultIdx 指向它），而非索引 0——索引 0 起是向内的更小候选，
-      // 默认就选中最小的会改变「点一下选中整张卡片」的既有习惯。
       const bc = buildCandidates(best);
       selCands = bc.cands;
       selIdx = bc.defaultIdx;
-      selDescIdx = -1;              // 强制 applySelection 按新的当前目标重算描述
+      selDescIdx = -1;
      }
      applySelection();
     } else clearHL();
@@ -2634,7 +2341,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const best = (hlTarget && document.contains(hlTarget)) ? hlTarget : findTarget(t);
    if (!best) return;
    try {
-    // hint：提取为空时专用的可操作原因（如评论区未展开）；warn：提取成功但内容可能不全（如回答折叠）
     const { blocks: b, title, hint, warn } = extractBlocks(best, { altClick: e.altKey });
     if (!b.length) { toast(hint || '所选元素未提取到有效内容', 'error'); return; }
     if (warn) toast(warn, 'info');
@@ -2695,8 +2401,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (modeAc) { modeAc.abort(); modeAc = null; }
    selCands = []; selIdx = 0; selAnchor = null; tipSig = ''; selDesc = ''; selDescIdx = -1;
   }
-
-  // ===== 预览渲染 =====
   function renderPreview(block, container, idx, depth = 0) {
    if (depth > C.PREVIEW_DEPTH_MAX) return;
    const wrap = document.createElement('div');
@@ -2707,7 +2411,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (type === 'paragraph') {
     const p = document.createElement('p');
     for (const rt of block.paragraph?.rich_text || []) {
-     // 渲染层协议复验：链接来源链路均经 safeURL，此处兜底再拦一道，防上游改动引入 javascript: 等协议
      const linkUrl = rt.text?.link ? safeURL(rt.text.link.url) : null;
      if (linkUrl) { const a = document.createElement('a'); a.href = linkUrl; a.textContent = rt.text.content; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.appendChild(a); }
      else p.appendChild(document.createTextNode(rt.text?.content || ''));
@@ -2720,7 +2423,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    } else if (type === 'bulleted_list_item' || type === 'numbered_list_item') {
     const li = document.createElement('li');
     li.textContent = rtStr(block[type]?.rich_text);
-    // 有序列表预览用数字序号，与发送后 Notion / 飞书观感一致
     if (type === 'numbered_list_item') li.style.listStyleType = 'decimal';
     content = li;
    } else if (type === 'quote') {
@@ -2751,7 +2453,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     div.textContent = `📺 嵌入: ${block.embed?.url || ''}`;
     content = div;
    } else if (type === 'table') {
-    // 表格外观全部由 PANEL_CSS 的 .nc-pv table / td / th 规则承载，无需逐单元格内联样式
     const table = document.createElement('table');
     const rows = block.table?.children || [];
     rows.forEach((row, ri) => {
@@ -2766,7 +2467,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     });
     content = table;
    } else if (type === 'divider') {
-    const hr = document.createElement('hr'); // 样式由 .nc-pv hr 提供，内联色不随暗色主题切换
+    const hr = document.createElement('hr');
     content = hr;
    } else if (type === 'toggle') {
     const det = document.createElement('details');
@@ -2816,9 +2517,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    collectLines(bks);
    return parts.join('\n');
   }
-  // DocumentFragment 批量渲染——逐块直接 append 到可见容器，
-  // 每次插入都可能触发样式/布局计算；离屏 Fragment 组装完成后单次挂载，
-  // 数百块内容的首次渲染显著减少布局抖动。（删除单块自 v5.19.0 起走 removeBlockAt 增量处理，不再全量重建。）
   function refreshPreview() {
    el.pv.innerHTML = '';
    if (!blocks.length) { el.pv.innerHTML = '<div class="nc-empty"><b>无内容</b>重新选取页面元素即可添加</div>'; el.pvCount.textContent = ''; return; }
@@ -2827,10 +2525,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    el.pv.appendChild(frag);
    el.pvCount.textContent = `共 ${blocks.length} 个块`;
   }
-  // v5.19.0：原实现删除单块走 refreshPreview 全量重建，预览区里所有 <img> 被丢弃重建、
-  // 重新解码甚至重新发请求——内容多时删一块就整屏闪一次，滚动位置也丢。
-  // 改为只摘除该块对应的节点并重排后续索引。顶层块持 data-index（renderPreview 传 idx>=0），
-  // 嵌套子块传 -1 不写该属性，故查询集恰为顶层块且保持文档顺序，重排不会波及它们。
   function removeBlockAt(idx) {
    if (!(idx >= 0) || idx >= blocks.length) return;
    blocks.splice(idx, 1);
@@ -2869,8 +2563,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    el.btnMin.title = '最小化';
    setPvExpanded(false);
   }
-  // 预览展开态由面板复位统一收敛——「重选 / 追加 / 重试」等路径都会走 restoreConfirmModal，
-  // 避免上一次展开的大预览残留到下一次剪藏。
   function setPvExpanded(on) {
    if (!el.pvExpand) return;
    el.pv.classList.toggle('expanded', !!on);
@@ -2905,7 +2597,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     }
    }
   }
-  // 返回 Promise<boolean>：调用方一律用 .then(ok => ...)，不可直接取布尔值
   async function tryCloseSettings() {
    if (!settingsDirty) return true;
    const ok = await askConfirm({
@@ -2925,21 +2616,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    e.preventDefault();
    e.stopImmediatePropagation();
    if (ov === el.ovAsk) { closeAsk(false); return; }
-   // 设置面板有未保存改动时先弹二次确认；用户选择保留则由询问框接管后续 Esc
    if (ov === el.ovSet) { tryCloseSettings().then((ok) => { if (ok) closeSettings(); }); return; }
-   // v5.20.0：发送中按 Esc 不再直接关面板。此前 closeConfirm 只隐藏 UI，
-   // 后台 Promise 照跑，最后结果面板会凭空弹回——用户以为关掉了，其实还在发。
-   // 改为显式询问是否停止，把「关窗口」和「停止发送」两件事分开。
    if (ov === el.ovCfm) { if (sending) { requestStopSend(); return; } closeConfirm(); return; }
    ov.style.display = 'none';
-   // 兜底分支（完成 / 失败面板）此前漏清倒计时定时器：面板虽已隐藏，
-   // 10 秒后 timer 仍会触发并残留倒计时文案。完成面板的关闭按钮一直有清，这里补上。
    clearTimeout(okAutoCloseTimer); stopOkCountdown();
   }
   document.addEventListener('keydown', onModalEsc, { signal, capture: true });
-  // ===== 发送历史与设置弹窗 =====
-  // 单遍替换——串 4 次全文正则遍历（&、<、>、" 各一次）
-  // 改为一次遍历 + 查表映射；发送历史渲染对每条记录调用，文本越长收益越大。转义顺序问题不复存在（单遍无二次转义风险）。
   const _ESC_MAP = Object.freeze({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' });
   function escHtml(s) { return String(s).replace(/[&<>"]/g, ch => _ESC_MAP[ch]); }
   function readSendHistory() {
@@ -2963,7 +2645,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     return `<div class="nc-hist-item"><span class="nc-hist-time">${escHtml(time)}</span><span class="nc-hist-title" title="${escHtml(h.title || '')}">${escHtml(h.title || '(无标题)')}</span><span class="nc-hist-plat">${escHtml(plats)}</span></div>`;
    }).join('') : '<div class="nc-hist-empty">暂无发送记录</div>';
   }
-  // tab 由调用方指定（如点击平台徽章直达对应分区），缺省沿用上次所在分区
   function openSettings(tab) {
    refreshSettings();
    switchTab(tab && SET_TABS.includes(tab) ? tab : (GM_getValue(STORAGE.SET_TAB, SET_TABS[0]) || SET_TABS[0]));
@@ -2981,10 +2662,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    renderSendHistory();
    rememberFocus();
    el.ovSet.style.display = 'flex';
-   // v5.22.0：聚焦目标改为「当前分区内第一个可见控件」。原实现恒聚焦 #in-blocklist，
-   // 而它属于 general 分区；从平台徽章直达 notion/feishu/obsidian 分区时该元素
-   // display:none，focus() 静默失败——键盘用户打开面板后焦点仍停在 body 上，
-   // 要按一次 Tab 才被 trapModalTab 拉回来，读屏也不会朗读任何分区标题。
    const activePane = el.ovSet.querySelector('.nc-pane.active');
    const firstField = modalFocusables(activePane || el.ovSet)[0];
    if (firstField) firstField.focus();
@@ -2994,18 +2671,13 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const onInputChange = () => { settingsDirty = true; if (el.dirtyFlag) el.dirtyFlag.style.display = 'block'; };
     for (const type of ['change', 'input']) inputs.forEach(inp => inp.addEventListener(type, onInputChange, { signal }));
     for (const ck of [el.ckNotion, el.ckFeishu, el.ckObsidian]) ck.addEventListener('change', syncSectionState, { signal });
-    // 凭据字段边输入边刷新指示灯，让 warn ↔ on 的切换与用户所见同步；
-    // 这几处只在设置面板内触发，不在 60Hz 高频路径上。
     for (const inp of [el.tok, el.db, el.fsAppId, el.fsSecret, el.obsApiKey]) {
      inp.addEventListener('input', syncSectionState, { signal });
     }
     settingsListenersAttached = true;
    }
   }
-
-  // ===== 配置导入导出 =====
   const BACKUP_KEYS = [STORAGE.ENABLE_NOTION, STORAGE.ENABLE_FEISHU, STORAGE.TOKEN, STORAGE.DB_ID, STORAGE.TAGS_PROP, STORAGE.FS_APP_ID, STORAGE.FS_APP_SECRET, STORAGE.FS_FOLDER, STORAGE.ENABLE_OBSIDIAN, STORAGE.OBSIDIAN_API_URL, STORAGE.OBSIDIAN_API_KEY, STORAGE.OBSIDIAN_FOLDER, STORAGE.BLOCKLIST, STORAGE.DOMAIN_TAGS, STORAGE.SEND_PROFILE, STORAGE.THEME];
-  // 设置表单文本字段清单：「打开回填(snap) / 保存落盘(save 可选转换，默认 trim) / 导入回填(imp 可选转换)」
   const FORM_FIELDS = [
    { key: STORAGE.TOKEN, input: el.tok, snap: 'notionToken' },
    { key: STORAGE.DB_ID, input: el.db, snap: 'notionDbId', save: parseDbId },
@@ -3077,19 +2749,9 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    renderSendHistory();
    toast('已清空发送历史', 'success');
   }, { signal });
-
-  // 覆盖层可见性判定——弹窗激活时不开启全新剪藏，防草稿 / 重试上下文被静默清空。
-  // 快捷键与悬浮球点击共用同一套守卫：此前只有快捷键有，面板打开时点悬浮球会进入
-  // 「选取模式已激活 + 确认面板仍显示」的叠加态。
   const ovVisible = (ov) => ov.style.display === 'flex';
   const startPickFlow = () => {
-   // v5.20.0：发送中不得重启选取。原实现会清空 blocks 并进入选取模式，
-   // 而后台发送仍持有快照在跑，两边同时改状态会导致结果面板砸在选取模式上。
    if (sending) { toast('发送正在进行，请先停止或等待完成', 'info'); return; }
-   // v5.22.0：补 ovAsk。它是唯一会叠在别的面板之上（DOM 里排最后 = 绘制最上层）的覆盖层，
-   // 漏掉它时，「确认面板点取消 → 弹出放弃确认 → 按 Alt+Shift+N」会走进下面的 ovCfm 分支：
-   // closeConfirm() 已经跑掉，而未决的 askResolve 和它的遮罩还留着，既吞掉选取阶段第一次点击，
-   // 又让随后的「放弃」作用在一个已经关掉的面板上。
    if (ovVisible(el.ovAsk) || ovVisible(el.ovErr) || ovVisible(el.ovOk) || ovVisible(el.ovSet)) return;
    if (ovVisible(el.ovCfm)) { appendMode = true; closeConfirm(); startSelect(); toast('追加模式：选取内容将并入当前剪藏', 'info'); }
    else triggerClipper();
@@ -3111,30 +2773,19 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    startSelect();
   }
-
-  // ===== 网络请求与安全复核 =====
   function gmRequest({ method, url, headers, data, timeout, responseType, signal }) {
    return new Promise((resolve, reject) => {
-    // v5.20.0：请求已排队但尚未发出时（错峰等待、批次间隙）直接让位给取消信号，
-    // 不必先发一个注定被丢弃的请求再处理它的响应。
      if (signal?.aborted) { reject(new NcAbort()); return; }
-     // v5.23.0：协议白名单。isPrivateURL 只看主机名——file:// 这类 URL 的 hostname 是空串，
-     // 既不命中 localhost 也不命中私网字面量，会被判为「非私网」直接放行到 GM_xmlhttpRequest。
-     // 本脚本只会访问 http(s) API，非白名单协议一律在进入请求前拒绝。
      let proto = '';
      try { proto = new URL(String(url), location.href).protocol; } catch (e) {   }
      if (proto !== 'http:' && proto !== 'https:') {
       reject(new Error('不受支持的协议，已拒绝请求: ' + (proto || '无法解析的 URL')));
       return;
      }
-     // finalUrl 二次复核：缓解 302 重定向穿透与 DNS rebinding，对最终实际访问的 URL 再拦一道；
      let rawIsPrivate = false;
      try { rawIsPrivate = isPrivateURL(url); } catch (e) {   }
     let settled = false;
     const done = (fn, arg) => { if (!settled) { settled = true; signal?.removeEventListener?.('abort', onAbort); fn(arg); } };
-    // 优雅停止：不 abort 在飞请求（GM_xmlhttpRequest 的句柄不主动 abort），
-    // 只让这个 Promise 提前以「已停止」兑现。已发出的写请求会在服务端照常落地，
-    // Notion/飞书随后靠 countChildren 读回真实写入量来校正断点，因此不会被重复提交。
     const onAbort = () => done(reject, new NcAbort());
     signal?.addEventListener?.('abort', onAbort, { once: true });
     GM_xmlhttpRequest({
@@ -3143,7 +2794,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      data: data ?? null,
      timeout: timeout || C.API_TIMEOUT,
      responseType: responseType || '',
-     // 原始目标本身即私网（如 Obsidian 本机 API）时豁免复核，否则会确定性拒绝合法请求；
      onload: res => {
       if (!rawIsPrivate && res.finalUrl) {
        try { if (isPrivateURL(res.finalUrl)) { done(reject, Object.assign(new Error('finalUrl 命中私网，响应已丢弃'))); return; } } catch (e) {   }
@@ -3155,10 +2805,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     });
    });
   }
-
   async function apiReqNotion(method, url, data, signal) {
-   // v5.19.0：isGet 原先写在 retryOn 闭包里，每次判定可重试性都要重新做一次大小写转换；
-   // 提到闭包外只算一次，语义不变。
    const isGet = String(method).toUpperCase() === 'GET';
    return withRetry(async (attempt) => {
     const res = await gmRequest({
@@ -3180,11 +2827,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     throw err;
    }, { retries: C.API_RETRY, signal, retryOn: (err) => (isGet || !err.isTimeout) && isRetryableError(err) });
   }
-
-  // ===== 飞书 API 与写入队列 =====
-  // 飞书 tenant_access_token 鉴权：生产路径（getFeishuToken，带缓存与提前续期）与连接测试路径
-  // （testFeishuConn，用表单值直连）原本各写一遍相同的请求与响应校验，收敛为具名函数。
-  // 注意：测试路径此前错误文案少了 statusText 兜底，统一后仅在「接口返回无 msg 字段」时可见差异。
   async function fsAuthToken(appId, appSecret) {
    const res = await gmRequest({
     method: 'POST',
@@ -3231,7 +2873,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     return isRetryableError(err) || err.code === 99991400 || err.code === 99991401;
    } });
   }
-
   let fsWriteChain = Promise.resolve();
   async function fsWrite(method, url, data, signal) {
    const task = async () => {
@@ -3243,8 +2884,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    fsWriteChain = fsWriteChain.then(task, task);
    return fsWriteChain;
   }
-
-  // ---------- 图片下载（带 LRU 缓存 + 重试） ----------
   async function fetchImage(url, signal) {
    if (DATA_IMG_RE.test(url)) {
     const d = decodeDataURL(url);
@@ -3302,14 +2941,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    imgFailTs.delete(url);
    return result;
   }
-
   async function mapLimit(items, limit, fn) {
    const ret = new Array(items.length);
    if (!items.length) return ret;
     let i = 0;
-    // v5.23.0：limit 为 0/undefined/非数字时 Math.min 会算出 NaN，Array.from({length: NaN})
-    // 得到空数组——所有条目被静默跳过、一个都不执行，调用方拿到一整组 undefined 且不报错
-    // （表现为「图片全部丢失但发送显示成功」）。强制收敛到 [1, items.length]。
     const n = Math.max(1, Math.min(Number(limit) > 0 ? Math.floor(Number(limit)) : 1, items.length));
     const workers = Array.from({ length: n }, async () => {
     while (i < items.length) { const idx = i++; ret[idx] = await fn(items[idx], idx); }
@@ -3340,15 +2975,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    throw lastErr;
   }
-
-  /**
-   * 递归插入块树：根级与子级统一走 /blocks/{parentBlockId}/children；
-   * 嵌套任务在父块创建成功后以其 block_id 递归插入，失败自动降级为根级追加（内容不丢）；
-   * 图片上传/回退均以父块局部索引定位，互不干扰。
-   */
-  // v5.19.0：Notion 与飞书的「失败时读回已写子块数」逻辑同构——都是游标翻页累加，
-  // 差异只在游标字段名与结果取值路径。原先两份实现分头维护，任一侧改分页上限/防护都要记得改另一份。
-  // 合并为单一分页器，两侧各传自己的取页函数与解包函数。guard 上限防止接口异常时无限翻页。
   async function countPagedChildren(fetchPage, readPage) {
    let total = 0, cursor = null;
    for (let guard = 0; guard < 100; guard++) {
@@ -3359,7 +2985,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }
    return total;
   }
-  // 与 fsCountChildren 同用途：Notion 侧失败时读回页面已写入子块数，校正断点续传边界。
   const notionCountChildren = (pageId) => countPagedChildren(
    (cursor) => apiReqNotion('GET', `https://api.notion.com/v1/blocks/${pageId}/children?page_size=100` + (cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : '')),
    (res) => {
@@ -3367,7 +2992,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     return { count: arr.length, hasMore: !!res?.has_more, next: res?.next_cursor || null };
    }
   );
-  // 飞书侧对账仅在根级（parentBlockId === docId）进行——嵌套层的批次索引不参与续传。
   const fsCountChildren = (docId, blockId) => countPagedChildren(
    (token) => fsWrite('GET', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children?page_size=500` + (token ? `&page_token=${encodeURIComponent(token)}` : '')),
    (res) => {
@@ -3375,17 +2999,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     return { count: items.length, hasMore: !!res?.data?.has_more, next: res?.data?.page_token || null };
    }
   );
-  // 图片进度计数器：递归统计整棵树的图片任务数，并共享给各层递增。
-  // 共享而非各层独立，是因为进度只在根级上报，必须拿到「全局」分母才单调。
   const countImgJobs = (c) => (c?.jobs?.length || 0) + (c?.nest || []).reduce((s, n) => s + countImgJobs(n.ctx), 0);
-  // v5.20.0：统一工作计量。块批次与图片任务是串行的两类工作单元，总进度必须是
-  // 「已完成单元 / 总单元」这一个单调函数。
-  // 不能像旧版那样把两段区间分别绑在批次下标与图片下标上再各自上报——两者在同一批次
-  // 循环内交替触发，mkProgress 的单调守卫会让先跑的那个把另一个永久吞掉。
-  // 这正是「进度条长时间冻结」的根因：旧版冻结在 70%（图片挤在第 0 批，块进度全被吞）；
-  // 若只把区间改成不相交的 20~65 / 65~95 而无统一计量，冻结位置只会挪到 95%。
-  // 分母在根级一次性定死：批次只数根级（嵌套批次是父批次的附属工作，成本计入父批次），
-  // 图片数全局（含嵌套）。两者在递归前都是已知常量，因此分母全程不变、进度不回退。
   const initWorkMeter = (state, rootBatches, startBatch) => {
    if (!state || typeof state.workTotal === 'number') return;
    state.workTotal = Math.max(1, rootBatches + (state.imgTotal || 0));
@@ -3393,13 +3007,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   };
   const workPct = (state) => (state && state.workTotal > 0) ? state.workDone / state.workTotal : 0;
   const bumpBatch = (state) => { if (state) state.workDone = Math.min(state.workTotal, (state.workDone || 0) + 1); };
-  // 图片同时推进两个计数：X/Y 文案按图片口径显示，进度数值走统一分母。
   const bumpImage = (state) => {
    if (!state) return;
    state.imgDone = Math.min(state.imgTotal, (state.imgDone || 0) + 1);
    state.workDone = Math.min(state.workTotal, (state.workDone || 0) + 1);
   };
-  async function fsInsertTree(docId, ctx, parentBlockId, onProgress, state, tokenByUrl = new Map(), startBatch = 0, signal) {
+  async function fsInsertTree(docId, ctx, parentBlockId, onProgress, state, tokenByUrl = new Map(), startBatch = 0, signal, degrade = false) {
    const batches = []; let cur = [], curImg = 0, curStart = 0;
    ctx.out.forEach((b, i) => {
     const isImg = b.block_type === FS_BLK.IMAGE;
@@ -3409,13 +3022,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (cur.length) batches.push({ blocks: cur, start: curStart });
    const failed = [];
    let imgFails = 0;
-   // 嵌套降级为根级追加的块数——不经 batches 计划，断点对账时须扣除。
-   // v5.23.0：这个值必须向上一层回传。降级写的是「根文档」，而嵌套层内部再降级时
-   // 只加在它自己的局部计数器上——外层读回的子块数里却包含这些块，扣除不足会把续传
-   // 边界往后推，重试时跳过尚未写入的块（静默丢内容）。故递归返回值带上 degradeBlocks。
-   // v5.19.0：原实现在每批循环里全量扫描 ctx.jobs / ctx.nest 再按索引区间过滤，
-   // 复杂度为 O(批数 × 任务数)；大文档（上百批 × 数百张图片）时绝大部分是注定不命中的空转。
-   // 批次的索引区间连续且有序，先用二分把任务一次性分派到所属批次，此后每批只遍历命中项。
+   const atRoot = parentBlockId === docId && !degrade;
+   let rootDegradeAppended = atRoot ? (state?.degradeSeed || 0) : 0;
    const batchIndexFor = (i) => {
     let lo = 0, hi = batches.length - 1;
     while (lo <= hi) {
@@ -3430,34 +3038,25 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const nestByBatch = batches.map(() => []);
    for (const job of ctx.jobs) { const b = batchIndexFor(job.index); if (b >= 0) jobsByBatch[b].push(job); }
    for (const nj of ctx.nest) { const b = batchIndexFor(nj.index); if (b >= 0) nestByBatch[b].push(nj); }
-   // 进度只在根级上报（沿用原设计）；嵌套层仍要参与计量，否则全局分母走不满。
-   const isRoot = parentBlockId === docId;
+   const isRoot = atRoot;
    initWorkMeter(state, batches.length, startBatch);
    for (let bi = startBatch; bi < batches.length; bi++) {
-    // v5.20.0：批次循环头是「优雅停止」的主要拦截点——只拦下一批，在飞请求照常落地。
-    // v5.22.0：拦截点必须挂断点（doneBatches）。此前这里是裸抛 NcAbort，sendToFeishu 的
-    // isAbort 分支又原样抛出，resume 全程为 null——重试会新建文档，把已写入的半篇再写一遍。
-    // 嵌套层刻意不挂：它的批次下标相对子树，拿去当根级续传边界会写错位置。
     if (signal?.aborted) {
      const e = new NcAbort();
-     if (isRoot) { e.doneBatches = bi; e.totalBatches = batches.length; }
+     if (isRoot) { e.doneBatches = bi; e.totalBatches = batches.length; e.degradeBlocks = rootDegradeAppended; }
      throw e;
     }
     const batch = batches[bi];
-    // 上报值取自统一工作计量（20~90），而非批次下标——下标口径会被同循环内的图片上报吞掉。
     if (onProgress && isRoot) onProgress(20 + Math.round(workPct(state) * 70), `飞书块 ${batch.start + 1}/${ctx.out.length}`);
     let res;
     try {
      res = await fsWrite('POST', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${parentBlockId}/children`, { children: batch.blocks }, signal);
     } catch (e) {
-     // v5.22.0：取消与失败走同一条对账路径。取消若发生在写入请求进行中，客户端已断但服务端
-     // 可能已落库，只有读回真实子块数才能算出正确断点；此前 isAbort 在此提前 return，
-     // 恰好绕过了当初为它写的对账逻辑（与 Notion appendChildren 同一个坑）。
      let done = bi;
-     if (parentBlockId === docId) {
+     if (isRoot) {
       try {
        const written0 = await fsCountChildren(docId, docId);
-       const written = Math.max(0, written0 - rootDegradeAppended); // 扣除嵌套降级块，否则边界前移导致重试丢块
+       const written = Math.max(0, written0 - rootDegradeAppended);
        let k = startBatch;
        for (; k < batches.length; k++) {
         const b = batches[k];
@@ -3467,8 +3066,9 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
        done = k;
       } catch (e2) { console.warn('[NC] 飞书子块数读回失败，退回按批次起点续传:', e2?.message || e2); }
      }
-     // 严格模式下对原始值赋值会抛 TypeError，故只给对象挂字段（与 appendChildren 同口径）
-     if (e && typeof e === 'object') { e.doneBatches = done; e.totalBatches = batches.length; }
+     if (e && typeof e === 'object' && done >= 0 && done < batches.length) {
+      e.doneBatches = done; e.totalBatches = batches.length; e.degradeBlocks = rootDegradeAppended;
+     }
      throw e;
     }
     if (state) state.appendedAny = true;
@@ -3479,9 +3079,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      const blockId = created[local]?.block_id;
      if (!blockId) { failed.push({ index: job.index, info: job.info }); continue; }
      try {
-      // v5.20.0：计数必须放在 onProgress 判定之外——嵌套层不报进度，但它的图片同样
-      // 计入全局分母；若把计数包在 if (onProgress) 里，嵌套图片永不计数，分母走不满，
-      // 进度条会停在半途。数值统一走 workPct，文案仍按图片口径显示。
       bumpImage(state);
       if (onProgress) onProgress(20 + Math.round(workPct(state) * 70), `上传图片 ${Math.min(state.imgDone, state.imgTotal)}/${state.imgTotal}…`);
       let bound = false;
@@ -3501,17 +3098,18 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
        tokenByUrl.set(job.info.url, fileToken);
        await fsWrite('PATCH', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`, { replace_image: { token: fileToken } }, signal);
       }
-     } catch (e) { console.error('[NC] 飞书图片上传失败:', e?.message || '未知错误'); failed.push({ index: job.index, info: job.info, blockId }); }
+     } catch (e) {
+      if (isAbort(e)) throw e;
+      console.error('[NC] 飞书图片上传失败:', e?.message || '未知错误');
+      failed.push({ index: job.index, info: job.info, blockId });
+     }
     }
       for (const nj of nestByBatch[bi]) {
       const local = nj.index - batch.start;
       if (local >= created.length) {
-       // v5.23.0：父块没建出来（服务端返回的块数少于提交数）时原实现直接 continue，
-       // 整棵嵌套子树静默消失、连降级都不试，用户只会看到内容少了一块。
-       // 改为与下面的失败分支一致——降级为根级追加，宁可位置退到文档末尾也不丢内容。
        console.warn('[NC] 嵌套父块未创建（index ' + nj.index + '，本批返回 ' + created.length + ' 块），降级为根级追加');
        try {
-        const sub = await fsInsertTree(docId, nj.ctx, docId, null, state, tokenByUrl, 0, signal);
+        const sub = await fsInsertTree(docId, nj.ctx, docId, null, state, tokenByUrl, 0, signal, true);
         imgFails += sub.imgFails;
         rootDegradeAppended += nj.ctx.out.length + (sub.degradeBlocks || 0);
        } catch (e3) {
@@ -3523,60 +3121,44 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      const nestParent = created[local]?.block_id;
      if (!nestParent) continue;
      try {
-      // v5.20.0：递归必须透传 signal，否则嵌套层在取消后仍会继续写。
-      // 嵌套层不传 onProgress（沿用原设计：进度只在根级上报）。
       const sub = await fsInsertTree(docId, nj.ctx, nestParent, null, state, tokenByUrl, 0, signal);
       imgFails += sub.imgFails;
-      // v5.23.0：子树内部若降级到根级，那些块会落在外层读回的子块数里，必须一并扣除，
-      // 否则续传边界后移、重试跳过尚未写入的块。
       rootDegradeAppended += sub.degradeBlocks || 0;
      } catch (e) {
-      // v5.22.0：嵌套层的 doneBatches 相对子树，绝不能外泄给根级续传。剥掉后，根级补上
-      // 自己的视角——本批的块已落库但嵌套子树未写完，退回本批重跑：宁可重写一批发散块，
-      // 也不能让半篇文档留在库里无人接管（那正是旧版「重试即重复整篇」的来源）。
       if (isAbort(e)) {
-       if (e && typeof e === 'object') { delete e.doneBatches; if (isRoot) { e.doneBatches = bi; e.totalBatches = batches.length; } }
+       if (e && typeof e === 'object') delete e.doneBatches;
        throw e;
       }
       console.warn('[NC] 嵌套插入失败，降级为根级追加:', e?.message || e);
       try {
-       const sub = await fsInsertTree(docId, nj.ctx, docId, null, state, tokenByUrl, 0, signal);
+       const sub = await fsInsertTree(docId, nj.ctx, docId, null, state, tokenByUrl, 0, signal, true);
        imgFails += sub.imgFails;
        rootDegradeAppended += nj.ctx.out.length + (sub.degradeBlocks || 0);
       } catch (e2) {
-       // 降级也失败：剥离嵌套运行携带的 doneBatches（相对嵌套批次，误用于根级续传会丢块），
-       // 让外层按无断点处理（重试新建文档，不在旧文档上误续传）
        if (e2 && typeof e2 === 'object') delete e2.doneBatches;
        throw e2;
       }
      }
     }
-    // 一个根批次计一个工作单元：它的块写入、图片上传、嵌套子树都算作这一批次的工作量。
-    // 只数根批次——嵌套批次不在分母里，计进去会让分子提前触顶，进度反而失真。
     if (isRoot) bumpBatch(state);
    }
-   // v5.20.0：块与图片都写完后先报到 95，把最后 5% 留给图片回退清理，
-   // 让用户在收尾阶段也能看到进度在动（旧版这一步是静默的）。
    if (onProgress && isRoot) onProgress(95, failed.length ? `正在处理 ${failed.length} 张失败图片…` : '正在收尾…');
-   for (const f of failed.sort((a, b) => b.index - a.index)) {
-    if (!f.blockId) continue;
-    try {
-     await fsWrite('DELETE', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${parentBlockId}/children/batch_delete`, { start_index: f.index, end_index: f.index + 1 }, signal);
-     const fbUrl = f.info.url;
-     const fbBlock = DATA_IMG_RE.test(fbUrl) ? { block_type: FS_BLK.TEXT, text: { elements: [{ text_run: { content: '🖼️ [内嵌图片上传失败，已略过]' } }] } } : fsLinkPara(`🖼️ 图片: ${fbUrl}`, fbUrl);
-     await fsWrite('POST', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${parentBlockId}/children`, { index: f.index, children: [fbBlock] }, signal);
-    } catch (e) { console.error('[NC] 飞书图片回退处理失败:', e?.message || '未知错误'); }
+   if (!degrade) {
+    for (const f of failed.sort((a, b) => b.index - a.index)) {
+     if (!f.blockId) continue;
+     try {
+      await fsWrite('DELETE', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${parentBlockId}/children/batch_delete`, { start_index: f.index, end_index: f.index + 1 }, signal);
+      const fbUrl = f.info.url;
+      const fbBlock = DATA_IMG_RE.test(fbUrl) ? { block_type: FS_BLK.TEXT, text: { elements: [{ text_run: { content: '🖼️ [内嵌图片上传失败，已略过]' } }] } } : fsLinkPara(`🖼️ 图片: ${fbUrl}`, fbUrl);
+      await fsWrite('POST', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks/${parentBlockId}/children`, { index: f.index, children: [fbBlock] }, signal);
+     } catch (e) { console.error('[NC] 飞书图片回退处理失败:', e?.message || '未知错误'); }
+    }
    }
    imgFails += failed.length;
    return { imgFails, degradeBlocks: rootDegradeAppended };
   }
-
-  // ===== Obsidian 发送 =====
   let obsWriteChain = Promise.resolve();
   const obsWrite = (task) => { obsWriteChain = obsWriteChain.then(task, task); return obsWriteChain; };
-
-  // 三处发送路径（Obsidian / Notion / 飞书）以同一规则定标题，收敛为具名函数；
-  // 复制路径与发送历史保持原样——它们对超长标题的处理语义不同，不参与收敛。
   const resolveSendTitle = (t) => t || pageTitle() || 'Untitled';
   const sendTitleOf = (t) => resolveSendTitle(t).substring(0, C.TITLE_MAX);
   function buildMarkdown(sendBlocks, sendTitle, sendTags) {
@@ -3595,8 +3177,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (onProgress) onProgress(10, '正在生成 Markdown…');
    const { md: mdContent, title } = buildMarkdown(sendBlocks, sendTitle, sendTags);
    if (onProgress) onProgress(45, '准备写入 Obsidian…');
-   // 逐段校验：encodeURIComponent('..') 仍是 '..'，仅去首尾斜杠挡不住路径穿越
-   // （保存路径可经「导入配置」带入，属不可信输入）。合法性处理与 safeTitle 同款。
    const folder = String(S.obsFolder || '').split(/[\\/]+/)
     .map(s => s.trim())
     .filter(s => s && s !== '.' && s !== '..')
@@ -3612,12 +3192,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const d = new Date(), p3 = (n) => String(n).padStart(3, '0');
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}.${p3(d.getMilliseconds())}`;
    };
-
-   // v5.19.0 修复：原实现把「探测请求失败」与「文件不存在」一律视为不存在（catch 后 exists 仍为 false），
-  // 网络抖动 / 插件瞬时 5xx 时会拿原路径直接 PUT —— 静默覆盖 vault 里已有的同名笔记，且不可撤销。
-  // 改为三态判定：明确 404 → 用原路径；明确 200 → 改用时间戳路径；其余一律抛错中止写入。
-  // 探测阶段的网络错误标 network=true 交给 withRetry 重试（重试仍失败才真正放弃），
-  // 而 401 等确定性错误不重试，直接把原因暴露给用户。
   const ensureUniquePath = async () => {
     if (!apiKey) throw new Error('未配置 Obsidian API Key（可在失败弹窗中复制 Markdown）');
     let probe;
@@ -3634,7 +3208,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const altRel = relPath.replace(/(\.md)$/i, ` ${fileStamp()}$1`);
     return altRel.split('/').filter(Boolean).map(encodeURIComponent).join('/');
    };
-
    let lastTargetPath = null;
    const executeWrite = () => withRetry(async () => {
     if (!apiKey) throw new Error('未配置 Obsidian API Key（可在失败弹窗中复制 Markdown）');
@@ -3657,11 +3230,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     signal,
     retryOn: (err) => err.network || err.status === 423 || err.status === 500,
    });
-
    if (onProgress) onProgress(65, '正在排队写入…');
    try {
-    // v5.20.0：排队期（sleep 间隙）可取消，一旦真正开写就不再中断——
-    // Obsidian 是单文件整体 PUT，半途停没有意义，而不停则最多浪费一次写入。
     await obsWrite(async () => {
      if (signal?.aborted) throw new NcAbort();
      await sleep(C.OBS_WRITE_GAP, signal);
@@ -3670,29 +3240,18 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     });
    } catch (err) {
     if (isAbort(err)) throw err;
-    // v5.23.0：包装后的 Error 必须保留 network，否则 mkSendError 会把它判成不可重试，
-    // 而「连不上 Local REST API」恰恰是最典型的可重试错误（插件没启动而已）。
     if (err?.network) throw Object.assign(new Error('Obsidian 写入失败：无法连接 Local REST API（请确认插件已启动，或在弹窗中复制 Markdown）'), { network: true });
     throw copyErrMeta(err, new Error('Obsidian 写入失败: ' + (err?.message || '未知')));
    }
    if (onProgress) onProgress(100, 'Obsidian 写入成功');
    return {};
   }
-
-  // ===== Notion 发送 =====
-  // Notion 官方负载限制为「任意 block / rich_text 数组 ≤100 元素」且「单请求 ≤1000 块元素、
-  // 500KB」（developers.notion.com/reference/request-limits）。原实现只按顶层块 100 个切分，嵌套 children
-  // 不计入——嵌套内容多的页面单请求块元素总量可达数千，确定性 validation_error 400，且该阶段失败
-  // 不设断点、重试原样复现。改为按「顶层块数 + 嵌套总量 + 估算字节」三重阈值规划分块。
   function notionBlockCount(b) {
    let n = 1;
    const body = b?.[b?.type];
    if (body && Array.isArray(body.children)) for (const c of body.children) n += notionBlockCount(c);
    return n;
   }
-  // v5.23.0：请求体按 UTF-8 字节计，原先统一乘 1.1 相当于假设「1 字符 ≈ 1 字节」，
-  // 中文实际是 3 字节，估算系统性偏小 2~3 倍。按码位分档估算（非 ASCII 一律按 3 算，
-  // 代理对会略偏大，取保守方向——宁可多切一批也不要超限被拒）。
   function estUtf8Bytes(s) {
    const str = String(s || '');
    let n = 0;
@@ -3700,20 +3259,15 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    return n;
   }
   function notionEstBytes(b) {
-   let bytes = 600; // 每块 JSON 结构固定开销粗估
+   let bytes = 600;
    const body = b?.[b?.type];
    const rt = body?.rich_text;
    if (Array.isArray(rt)) for (const t of rt) bytes += estUtf8Bytes(t?.text?.content) + estUtf8Bytes(t?.text?.link?.url) + 120;
-   // v5.23.0：table_row 的内容在 cells（二维数组，每项是一个 rich_text 数组）里，
-   // 根本不在 rich_text 字段上——原实现因此把表格内容完全漏算，大表格的估算只剩每块 600B
-   // 的固定开销，请求体实际远超 NOTION_REQ_BYTES_MAX，被 Notion 以 validation_error 拒收。
-   // 而分块是确定性的：重试会原样复现，该页永久发不出去。
    const cells = body?.cells;
    if (Array.isArray(cells)) for (const cell of cells) {
     if (!Array.isArray(cell)) continue;
     for (const t of cell) bytes += estUtf8Bytes(t?.text?.content) + estUtf8Bytes(t?.text?.link?.url) + 120;
    }
-   // 图片 / 书签 / 嵌入的 URL 同样计入请求体（external.url 与 url 两种字段形态）。
    const extUrl = body?.external?.url || body?.url;
    if (typeof extUrl === 'string') bytes += estUtf8Bytes(extUrl);
    const kids = body?.children;
@@ -3733,29 +3287,17 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (s < blks.length) ranges.push({ start: s, end: blks.length });
    return ranges;
   }
-  // 断点续传对账：某一批可能因网络丢响应而「已落库但客户端判定失败」，此时若只按批次起点
-  // 记录进度，重试会把同一批原样再写一遍（目标页出现重复段落）。故失败时读回服务端实际子块数，
-  // 用真实边界校正续传进度；读回失败时退回原语义，不因对账阻断重试。
   async function appendChildren(pageId, blks, onProgress, base = 0, signal) {
    const ranges = notionPlanChunks(blks, 0);
    for (let ri = 0; ri < ranges.length; ri++) {
-    // v5.20.0：优雅停止的拦截点——只拦「下一批」，在飞请求照常落地，
-    // 这样下面的对账仍能读回真实写入量，续传边界不会算错。
-    // v5.22.0：拦截点必须挂断点（e.sent）。此前这里是裸抛 NcAbort，sendToNotion 的
-    // isAbort 分支又原样往外抛，resume 全程为 null——重试会重新 POST /v1/pages 建新页，
-    // 把上一轮已写入的半篇再写一遍，产生无法自动清理的重复内容。
     if (signal?.aborted) { const e = new NcAbort(); e.sent = ranges[ri].start; throw e; }
     const { start, end } = ranges[ri];
     try {
      await apiReqNotion('PATCH', `https://api.notion.com/v1/blocks/${pageId}/children`, { children: blks.slice(start, end) }, signal);
      if (onProgress) onProgress(base + end, base + blks.length);
     } catch (e) {
-     // v5.22.0：取消与失败走同一条对账路径。取消若发生在请求进行中，客户端已断但服务端
-     // 可能已落库，只有读回真实子块数才能算出正确断点；此前 isAbort 在此提前 return，
-     // 恰好绕过了当初为它写的对账逻辑。
      let confirmed = start;
      try {
-      // 对账请求刻意不传 signal：取消后仍需读回真实写入量才能算出正确断点。
       const written = await notionCountChildren(pageId);
       confirmed = Math.max(start, Math.min(end, written - base));
      } catch (e2) { console.warn('[NC] Notion 子块数读回失败，退回按批次起点续传:', e2?.message || e2); }
@@ -3763,7 +3305,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      throw e;
     }
     if (ri + 1 < ranges.length) {
-     // 本批已确认落库后才进入错峰等待；等待被中断时断点推进到本批末尾，不能退回批首。
      try { await sleep(getProfile().apiGapMs, signal); }
      catch (e) { if (e && typeof e === 'object') e.sent = end; throw e; }
     }
@@ -3784,10 +3325,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    ['Content Image', () => safeURL(pageMainImage())],
    ['Icon', () => safeURL(pageIcon())],
   ];
-  // v5.23.0：把原始错误的 status / code / network 复制到包装后的新 Error 上。
-  // mkSendError 依赖这三个字段判断 credential（401/403 → 引导去设置里改凭据）与
-  // retryable（网络错误 / 429 / 5xx → 可重试）。此前包装时一律丢弃，401 被当成普通失败，
-  // 可重试的 5xx 反而显示成「不可重试」，错误面板给出的处置建议是错的。
   function copyErrMeta(from, to) {
    if (Number.isInteger(from?.status)) to.status = from.status;
    if (from?.code != null) to.code = from.code;
@@ -3800,14 +3337,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     lastNotionPageId = resume.pageId;
     const startIdx = resume.sent || 0;
     try {
-     // v5.20.0：续传进度原先也从 10 起算，而首次发送走到失败时进度早已超过 10，
-     // 单调守卫会把这些上报全部吞掉——重试时进度条纹丝不动，看着像卡死。
-     // 改为把已完成的部分计入基数，使续传与首次发送的进度在同一条单调曲线上。
-     // v5.23.0：appendChildren 回调的 sent/total 已经是绝对量（内部加过 base），此处不应再加一次 startIdx。
-     // 旧版双计的后果是进度虚高，且块数标签显示成「已写 1250 / 共 1250」——实际只有 1000 块。
      await appendChildren(resume.pageId, allBlocks.slice(startIdx), (sent, total) => { if (onProgress) onProgress(10 + Math.round(sent / total * 85), `Notion 块 ${sent}/${total}`); }, startIdx, signal);
     } catch (e) {
-     // v5.22.0：取消与失败共用同一份断点，区别只在是否包装成新的 Error。
      const sent = (resume.sent || 0) + (e.sent || 0);
      if (isAbort(e)) { if (e && typeof e === 'object') e.resume = { pageId: resume.pageId, sent }; throw e; }
      const err = copyErrMeta(e, new Error('页面已存在，剩余内容追加失败: ' + (e?.message || '未知')));
@@ -3854,12 +3385,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    lastNotionPageId = resp.id;
    if (firstRange && firstRange.end < allBlocks.length) {
     try {
-     // v5.23.0：同上，回调的 sent 已含 firstRange.end。旧写法在分子里又加了一次它，
-     // 使商值超过 1，进度在还剩数批未写时就被单调守卫钳到 100%，
-     // 末尾那次 onProgress(100) 因此被吞掉，用户以为已经发完。
      await appendChildren(resp.id, allBlocks.slice(firstRange.end), (sent, total) => { if (onProgress) onProgress(10 + Math.round(sent / allBlocks.length * 85), `Notion 块 ${sent}/${allBlocks.length}`); }, firstRange.end, signal);
     } catch (e) {
-     // v5.22.0：同上——停止发送也要带 resume，否则「已写入的半篇」会被重试从头再写一遍。
      const sent = firstRange.end + (e.sent || 0);
      if (isAbort(e)) { if (e && typeof e === 'object') e.resume = { pageId: resp.id, sent }; throw e; }
      const err = copyErrMeta(e, new Error('页面已创建，但部分内容追加失败: ' + (e?.message || '未知')));
@@ -3867,14 +3394,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      throw err;
     }
    }
-   // v5.20.0：原先只在上一个分支里报 95，且从不报 100——只启用 Notion 时
-   // 进度条会永远停在 95%（飞书/Obsidian 都会报到 100），并被随后的 hideProgress 直接抹掉。
    if (onProgress) onProgress(100, 'Notion 完成');
   }
-
-  // ===== 飞书发送 =====
-  // v5.23.0：回收「还没写入任何内容」的飞书文档。建文档成功后、写入前的任何失败
-  // （初始化超时、被用户停止）都会留下一份空文档，此前只有写入阶段的失败路径会清理。
   async function trashEmptyDoc(docId) {
    if (!docId) return;
    try { await fsWrite('POST', `https://open.feishu.cn/open-apis/drive/v1/files/${docId}/trash?type=docx`, {}); if (lastFeishuDocId === docId) lastFeishuDocId = null; }
@@ -3901,7 +3422,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      await sleep(C.FS_INIT_WAIT, signal);
      try { const check = await fsWrite('GET', `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}`, null, signal); if (check?.data?.document?.document_id) { docReady = true; break; } } catch (e) { if (isAbort(e)) throw e; }
     }
-    // v5.23.0：此时文档已经建出来了，不回收就会在云盘里留下一份空文档。
     if (!docReady) { await trashEmptyDoc(docId); throw new Error('飞书文档初始化超时，请重试'); }
    }
    const imgSet = new Set();
@@ -3918,8 +3438,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (imgUrls.length > C.FS_IMG_WARN) toast(`共 ${imgUrls.length} 张图片，将全部上传（较多时耗时较长）`, 'info');
    const imgInfo = new Map();
    if (imgUrls.length) {
-    // v5.20.0：图片下载通常是整个发送里最耗时的一段（几十张图可达数十秒），
-    // 旧版恒定报 5% 且全程不动，是最典型的「进度条假死」来源。改为按完成数推进 2→20。
     let dlDone = 0;
     const infos = await mapLimit(imgUrls, getProfile().imgConc, async (url, i) => {
      try {
@@ -3943,21 +3461,21 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const srcUrl = safeURL(location.href);
    if (srcUrl) ctx.out.push(fsLinkPara(`🔗 原文链接: ${srcUrl}`, srcUrl));
    blocksToFeishu(sendBlocks, ctx);
-   const state = { appendedAny: false, imgDone: 0, imgTotal: countImgJobs(ctx) };
+   const state = { appendedAny: false, imgDone: 0, imgTotal: countImgJobs(ctx),
+    degradeSeed: (canResume && Number.isInteger(resume.degrade)) ? resume.degrade : 0 };
    let imgFails = 0;
    try {
     const res = await fsInsertTree(docId, ctx, docId, onProgress, state, new Map(), startBatch, signal);
     imgFails = res.imgFails;
    } catch (e) {
-    // v5.22.0：取消与失败走同一条断点路径。此前 isAbort 在此直接抛出，fsInsertTree 挂上的
-    // doneBatches 无人消费，重试会新建文档把已写入的半篇再写一遍；顺带也漏掉了空文档清理——
-    // 一开始就点停止的话，云盘里会留下一份空文档。
     const stopped = isAbort(e);
-    if (!state.appendedAny && !canResume) {
+    const hasBreakpoint = typeof e.doneBatches === 'number' && e.doneBatches >= 0
+      && e.doneBatches < (e.totalBatches ?? Infinity);
+    const abandon = !canResume && (!state.appendedAny || (stopped && !hasBreakpoint));
+    if (abandon) {
       await trashEmptyDoc(docId);
-    } else if (typeof e.doneBatches === 'number' && e.doneBatches >= 0) {
-     e.resume = { docId, done: e.doneBatches };
-     // 停止发送时不改写 message：那是用户主动为之，文案应保持「已取消」的语义
+    } else if (hasBreakpoint) {
+     e.resume = { docId, done: e.doneBatches, degrade: e.degradeBlocks || 0 };
      if (!stopped) e.message = `文档已创建但部分内容追加失败（已完成 ${e.doneBatches}/${e.totalBatches || '?'} 批，重试将从断点续传）: ${(e.message || '未知').substring(0, 120)}`;
     }
     throw e;
@@ -3965,11 +3483,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (onProgress) onProgress(100, '飞书 完成');
    return { docId, imgFails };
   }
-
-  // ===== 发送编排 =====
-  // v5.20.0：错误结构化。原先 fail() 直接把 message 截断成 200 字的字符串，
-  // 面板上就只剩一句没有状态码、没有错误码的纯文本，用户无法判断该重试还是该去改凭据。
-  // 改为保留结构化字段，截断推迟到渲染层（且改成可展开的折叠，不再硬丢内容）。
   const PLAT_TAB = { notion: 'notion', feishu: 'feishu', obsidian: 'obsidian' };
   function mkSendError(key, label, err) {
    return {
@@ -3978,13 +3491,11 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     status: Number.isInteger(err?.status) ? err.status : null,
     code: err?.code ?? null,
     message: err?.message || '未知错误',
-    // 凭据类错误（401/403）用户必须去设置里改，重试多少次都不会成功
     credential: err?.status === 401 || err?.status === 403 || err?.code === 99991661 || err?.code === 99991663 || err?.code === 99991664 || err?.auth === true,
     retryable: !isAbort(err) && (!!err?.network || !!err?.resume || (Number.isInteger(err?.status) && (err.status === 429 || err.status >= 500))),
     resume: err?.resume || null,
    };
   }
-  // 渲染错误面板：按平台分组，长文本折叠而非硬截断。
   function renderErrors(errs) {
    lastErrors = errs || [];
    const host = el.errDetail;
@@ -4002,7 +3513,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     body.className = 'nc-err-body';
     body.textContent = e.message;
     box.append(head, body);
-    // 超过阈值才需要折叠——短错误多一层交互反而碍事
     if (e.message.length > 400) {
      box.classList.add('is-clamped');
      const more = document.createElement('button');
@@ -4026,50 +3536,35 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    const shouldNotion = useNotion && (!onlyPlatforms || onlyPlatforms.includes('notion'));
    const shouldFeishu = useFeishu && (!onlyPlatforms || onlyPlatforms.includes('feishu'));
    const shouldObsidian = useObsidian && (!onlyPlatforms || onlyPlatforms.includes('obsidian'));
-   // v5.22.0：无可用平台必须在锁定 UI 之前返回。原守卫放在 setSendingUI(true) 之后且漏了
-   // 复位，会留下「标题/标签永久只读 + 重选/追加/最小化永久 disabled + 徽章恒灰」的卡死态；
-   // 更糟的是此时 sending 仍为 false、函数已经返回，没有任何自愈路径，只能刷新页面。
    if (!shouldNotion && !shouldFeishu && !shouldObsidian) { toast('没有可发送的平台', 'error'); return; }
    el.send.disabled = true; el.send.textContent = '发送中...'; el.send.classList.add('is-loading');
    setSendingUI(true);
    let notionOk = false, feishuOk = false, obsidianOk = false;
    let errors = [], failedPlatforms = [], successPlatforms = [], nextNotionResume = null, nextFeishuResume = null;
-
    const active = [];
    if (shouldNotion) active.push('notion');
    if (shouldFeishu) active.push('feishu');
    if (shouldObsidian) active.push('obsidian');
    const weight = active.length > 0 ? 100 / active.length : 100;
-   // 行集合必须在 active 算出之后才建，否则会对未启用平台建空行
    showProgress(active);
-
    const progMap = { notion: 0, feishu: 0, obsidian: 0 };
    let progSum = 0;
-   // v5.19.0：原实现每次进度回调都对 active 做一次 reduce 求和（每次还新建迭代闭包），
-   // 而各平台进度是单调不减的，增量维护总和即可，行为完全等价。
    const mkProgress = (name) => (pct, txt) => {
     const v = Math.min(Math.max(pct | 0, 0), 100);
     if (v > progMap[name]) { progSum += v - progMap[name]; progMap[name] = v; }
     updateProgress(progSum * weight / 100, txt ? `${PLATFORM_LABELS[name] || name} · ${txt}` : undefined);
     bumpRow(name, v, txt);
    };
-
    const signal = opts?.signal;
-   // v5.20.0：取消不再计入 errors。它是用户主动为之，不是平台故障，
-   // 混进错误列表会让「部分发送失败」把一次主动停止也报成失败。
    const aborted = [];
-   // 终态标记与失败记账合一：此前 onFail 只记文字，进度行会永远停在断点百分比
-   // 且不带任何终态提示，用户分不清「还在跑」和「已经失败了」。
    const fail = (name, key, err) => {
     markRow(key, isAbort(err) ? 'stopped' : 'error');
     if (isAbort(err)) { aborted.push(key); return; }
     errors.push(mkSendError(key, name, err)); failedPlatforms.push(key);
    };
-
    const promises = [];
    const staggerMs = getProfile().staggerMs;
    let platSeq = 0;
-   // 错峰红线：platSeq 依启用顺序自增 × staggerMs（Notion→飞书→Obsidian，仅计启用平台），该语义不可变。
    const platformJobs = [
     { enabled: shouldNotion, run: () => sendToNotion(sendBlocks, sendTitle, sendTags, notionResume || null, mkProgress('notion'), signal), onSuccess: () => { notionOk = true; markRow('notion', 'done'); successPlatforms.push({ key: 'notion', label: PLATFORM_LABELS.notion }); }, onFail: (err) => { if (err?.resume) nextNotionResume = err.resume; fail(PLATFORM_LABELS.notion, 'notion', err); } },
     { enabled: shouldFeishu, run: () => sendToFeishu(sendBlocks, sendTitle, mkProgress('feishu'), feishuResume || null, signal), onSuccess: ({ docId, imgFails }) => { feishuOk = true; lastFeishuDocId = docId; markRow('feishu', 'done'); successPlatforms.push({ key: 'feishu', label: imgFails ? `${PLATFORM_LABELS.feishu}（${imgFails} 张图片回退）` : PLATFORM_LABELS.feishu }); }, onFail: (err) => { if (err?.resume) nextFeishuResume = err.resume; fail(PLATFORM_LABELS.feishu, 'feishu', err); } },
@@ -4078,31 +3573,18 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    for (const job of platformJobs) {
     if (!job.enabled) continue;
     const delay = (platSeq++) * staggerMs;
-    // 错峰等待也接 signal：第二、三个平台往往要等上数秒，这段正是停止的高发窗口。
     promises.push(sleep(delay, signal).then(job.run).then(job.onSuccess).catch(job.onFail));
    }
-
-   // （v5.22.0：原先这里的 !promises.length 守卫已上移到锁定 UI 之前，与 platformJobs 的
-   //  enabled 判定同源——留两份守卫迟早会漂移，且这一份在 setSendingUI(true) 之后无法自愈）
-   // 复位必须走 finally：此前复位语句在直线路径上，一旦中途抛错就会留下
-   // 「sending 恒 true（beforeunload 永久拦截离页）+ 发送按钮恒 disabled」的卡死态。
    try {
     sending = true;
     await Promise.all(promises);
-
-    // v5.20.0：改用 Map 去重。原先 accSuccess 是数组且只在 doSend 里复位，
-    // 重试成功会再 push 一次同名平台，反复重试后「已成功」里会出现重复项。
     for (const sp of successPlatforms) accSuccess.set(sp.key || sp.label, sp.label);
     const allSuccess = [...accSuccess.values()];
     if (allSuccess.length > 0 && successPlatforms.length > 0) recordSendHistory(sendTitle, allSuccess);
-
     if (errors.length > 0 || aborted.length > 0) {
-     // 停止的平台也要能续传：它们的 resume 与失败平台一并按同样规则存起来，
-     // 重试时即可从断点继续，用户不必重头再来。
      const retryPlatforms = failedPlatforms.concat(aborted);
      cachedSend = { blocks: sendBlocks, title: sendTitle, tags: sendTags, failedPlatforms: retryPlatforms, notionResume: nextNotionResume, feishuResume: nextFeishuResume };
      closeConfirm();
-     // 走 class 而非内联色：内联色不随暗色主题切换，且 #e65100 在白底仅 3.79:1（不达 WCAG AA）
      const stopped = aborted.length > 0;
      if (stopped) { el.errTitle.textContent = '⏹ 已停止发送'; el.errTitle.classList.add('is-warn'); }
      else if (allSuccess.length > 0) { el.errTitle.textContent = '⚠️ 部分发送失败'; el.errTitle.classList.add('is-warn'); }
@@ -4113,15 +3595,11 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      if (stopped) {
       const note = document.createElement('div');
       note.className = 'nc-err-body';
-      // v5.22.0：前半句在 v5.20.0 就写了，但当时 resume 恒为 null，「从断点继续」是句空话。
-      // 现在取消也带断点，才需要区分两种情形，避免在根本没写入时给出错误预期。
       const hasResume = !!(nextNotionResume || nextFeishuResume);
       note.textContent = `已停止：${aborted.map((k) => PLATFORM_LABELS[k] || k).join('、')}。已写入的内容会保留，可点「重试」${hasResume ? '从断点继续' : '重新发送'}。`;
       el.errDetail.append(note);
      }
-     // 复制 Markdown 只在有平台没成功时才有意义（内容还没完整落地）
      el.errMd.style.display = retryPlatforms.length ? '' : 'none';
-     // 凭据类错误时给直达入口——这类错误重试多少次都不会成功，必须去改设置
      const credErr = errors.find((e) => e.credential);
      if (el.errGotoSet) {
       el.errGotoSet.style.display = credErr ? '' : 'none';
@@ -4142,9 +3620,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     }
    } finally {
     sending = false;
-    // 复位必须走 finally（v5.18 教训：放在直线路径上，中途抛错会留下
-    // 「sending 恒 true → beforeunload 永久拦截离页 + 发送按钮恒 disabled」的卡死态）。
-    // setSendingUI 同样在此复位，否则取消/失败后输入框会一直锁在只读。
     el.send.disabled = false; el.send.textContent = '发送'; el.send.classList.remove('is-loading'); hideProgress();
     setSendingUI(false);
    }
@@ -4152,8 +3627,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   const doSend = () => {
    if (sending || el.send.disabled) return;
    const sendBlocks = blocks.slice();
-   // v5.23.0：确认面板里逐块删到「无内容」后发送按钮仍可点，原实现无守卫——
-   // 会把空内容发到三个平台，凭空建出一个空页面 / 空文档 / 空笔记。
    if (!sendBlocks.length) { toast('没有可发送的内容', 'error'); return; }
    const sendTitle = resolveSendTitle(el.title.value);
    const sendTags = el.tags.value || '';
@@ -4163,8 +3636,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    sendToAll(sendBlocks, sendTitle, sendTags, null, null, null, { signal: sendAc.signal })
     .catch((err) => { console.error('[NC] 发送流程异常:', err); toast('发送流程异常: ' + (err?.message || '未知'), 'error'); });
   };
-  // v5.20.0：停止发送。Esc 与「停止发送」按钮共用同一入口，
-  // 走二次确认是因为停止后已写入的内容需要用户自己决定是否重试。
   function requestStopSend() {
    if (!sending || !sendAc || sendAc.signal.aborted) return;
    askConfirm({ title: '停止发送', okText: '停止', danger: true, message: '正在发送中。停止后已写入的内容会保留，你可以稍后点「重试」从断点继续。\n\n确定要停止吗？' })
@@ -4181,18 +3652,13 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    el.retry.disabled = true; el.retry.textContent = '发送中...'; el.retry.classList.add('is-loading'); el.ovErr.style.display = 'none';
    el.title.value = cachedSend.title || pageTitle() || 'Untitled'; el.tags.value = cachedSend.tags || '';
    restoreConfirmModal();
-   // 重试只针对失败/已停止的平台，进度行同样只建这些，避免上次已成功的平台再占一行
    showProgress(cachedSend.failedPlatforms || []);
    openConfirm();
-   // 重试不复位 accSuccess：此前已经成功的平台仍需在结果面板里列出，
-   // 而改用 Map 后重复成功也只会覆盖，不会累积重复项（旧数组会累积）。
    sendAc = new AbortController();
    sendToAll(cachedSend.blocks, cachedSend.title, cachedSend.tags, cachedSend.failedPlatforms, cachedSend.notionResume || null, cachedSend.feishuResume || null, { signal: sendAc.signal })
     .catch((err) => { console.error('[NC] 重试流程异常:', err); toast('发送流程异常: ' + (err?.message || '未知'), 'error'); })
     .finally(() => { el.retry.disabled = false; el.retry.textContent = retryLabel; el.retry.classList.remove('is-loading'); });
   }
-
-  // ===== 密码可见性切换 =====
   function createPasswordToggle(input, button) {
    return () => {
     const show = input.type !== 'text';
@@ -4203,8 +3669,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   el.tokTglNotion.addEventListener('click', createPasswordToggle(el.tok, el.tokTglNotion), { signal });
   el.tokTglFeishu.addEventListener('click', createPasswordToggle(el.fsSecret, el.tokTglFeishu), { signal });
   el.tokTglObsidian.addEventListener('click', createPasswordToggle(el.obsApiKey, el.tokTglObsidian), { signal });
-
-  // ===== 连接测试 =====
   async function runConnTest(btn, fn, opts = {}) {
    if (btn.disabled) return false;
    btn.disabled = true; const orig = btn.textContent; btn.textContent = '⏳ 测试中';
@@ -4288,13 +3752,9 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     toast(parts.join('　'), failList.length ? 'error' : 'success');
    } finally { el.testAll.disabled = false; el.testAll.textContent = orig; }
   }, { signal });
-
-  // ===== 事件绑定 =====
   const closeSettings = () => {
    el.ovSet.style.display = 'none'; restoreFocus();
-   // 关闭后指示灯/角标回落为已落盘状态（放弃的修改不应继续显示为生效）
    syncSectionState();
-   // 设置里改过平台开关后回到仍打开的确认面板，徽章需按新配置重绘
    if (el.ovCfm && el.ovCfm.style.display === 'flex') renderPlatBadges();
   };
   $('#btn-sc').addEventListener('click', () => { tryCloseSettings().then((ok) => { if (ok) closeSettings(); }); }, { signal });
@@ -4321,13 +3781,9 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   }, { signal });
   el.back.addEventListener('click', () => { closeConfirm(); blocks = []; hlTarget = null; imgDL = new Map(); imgDLBytes = 0; imgFailTs.clear(); startSelect(); }, { signal });
   el.btnAdd.addEventListener('click', () => { appendMode = true; closeConfirm(); startSelect(); }, { signal });
-  // v5.20.0：发送中「取消」不再直接关闭面板。原实现 closeConfirm() 会隐藏弹窗，
-  // 但后台请求仍在跑，结果面板随后会砸回已经关闭的确认面板上，且已写入内容无从追溯。
-  // 改为走二次确认的停止入口：停止后已写入内容保留，可点「重试」从断点继续。
   el.cc.addEventListener('click', () => { if (sending) requestStopSend(); else closeConfirm(); }, { signal });
   el.send.addEventListener('click', doSend, { signal });
   el.btnCopy.addEventListener('click', (e) => { e.stopPropagation(); copyText(textFromBlocks(blocks), '📋 已复制到剪贴板'); }, { signal });
-  // 确认弹窗「复制 Markdown」，与失败弹窗的 Markdown 复制能力对齐；两处共用同一生成/复制/报错流程
   const copyBlocksMd = (bks, title, tags) => {
    try { const { md } = buildMarkdown(bks, title, tags); copyText(md, '📋 已复制 Markdown 到剪贴板'); }
    catch (err) { toast('生成 Markdown 失败: ' + (err?.message || '未知'), 'error'); }
@@ -4342,8 +3798,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   el.okOpenObsidian.addEventListener('click', () => { const a = document.createElement('a'); a.href = 'obsidian://'; a.style.display = 'none'; document.body.appendChild(a); a.click(); a.remove(); }, { signal });
   el.okClose.addEventListener('click', () => { clearTimeout(okAutoCloseTimer); stopOkCountdown(); el.ovOk.style.display = 'none'; cachedSend = null; }, { signal });
   el.retry.addEventListener('click', doRetry, { signal });
-  // v5.20.0：复制不再读 DOM 的 textContent（DOM 里长错误是折叠 + 截断的，复制出来会缺内容），
-  // 改从 lastErrors 结构化数据源序列化，保证复制的内容与服务端返回完全一致。
   el.errCopy.addEventListener('click', () => {
    if (!lastErrors.length) { copyText(el.errDetail.textContent || '', '已复制错误详情'); return; }
    const head = el.errTitle.textContent || '';
@@ -4361,27 +3815,18 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (!cachedSend) { toast('没有可复制的内容', 'error'); return; }
    copyBlocksMd(cachedSend.blocks, resolveSendTitle(cachedSend.title), cachedSend.tags || '');
   }, { signal });
-  // v5.20.0：关闭失败面板等于丢弃 cachedSend（整篇剪藏的 blocks 快照），
-  // 一旦误点就再也找不回来，只能回页面重选。加一道确认。
   el.errClose.addEventListener('click', () => {
    if (!cachedSend) { el.ovErr.style.display = 'none'; return; }
    askConfirm({ title: '放弃这次剪藏？', okText: '放弃', danger: true, message: '关闭后这次剪藏的内容将不再保留，需要回到页面重新选取。\n\n确定要关闭吗？' })
     .then((ok) => { if (!ok) return; el.ovErr.style.display = 'none'; cachedSend = null; });
   }, { signal });
-  // 凭据类错误（401/403）重试多少次都不会成功，直达对应平台的设置页签
   el.errGotoSet.addEventListener('click', () => {
    const tab = el.errGotoSet.dataset.tab || 'general';
    el.ovErr.style.display = 'none';
    openSettings(tab);
   }, { signal });
-  // ===== 全局快捷键与生命周期 =====
   function onGlobalKey(e) {
-   // closed Shadow DOM 下 document.activeElement 经重定向恒为本脚本宿主 DIV，输入框聚焦判定优先读 shadow.activeElement
    const active = shadow.activeElement || document.activeElement;
-   // v5.22.0：补两类放过条件。
-   // ① IFRAME——各类富文本 / 邮件编辑器的输入焦点对父文档不可见，activeElement 只到 iframe 本身，
-   //   漏判就会在用户正文打字时把光标抢走、开启选取模式。
-   // ② 修饰键——Alt+Shift+N 是脚本快捷键，但 Ctrl/Cmd 参与的组合通常属于浏览器或宿主站点，不该被抢。
    if (e.ctrlKey || e.metaKey) return;
    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'IFRAME' || active.isContentEditable)) return;
    if (e.altKey && e.shiftKey && e.code === 'KeyN') {
@@ -4390,18 +3835,14 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     startPickFlow();
    }
   }
-  // 确认弹窗存在未发送内容时（含最小化停放）离开页面同样警告，防剪藏草稿静默丢失
   window.addEventListener('beforeunload', (e) => { if (sending || (blocks.length && el.ovCfm.style.display === 'flex')) { e.preventDefault(); e.returnValue = ''; } }, { signal });
   window.addEventListener('pagehide', (e) => { if (e.persisted) return; if (window.__ncCleanup) window.__ncCleanup(); }, { signal });
   document.addEventListener('keydown', onGlobalKey, { signal, capture: true });
-  // ===== 初始化收尾 =====
-  applyTheme(S.theme);                 // 主题：auto 时不挂属性，交由 CSS 媒体查询跟随系统
+  applyTheme(S.theme);
   switchTab(GM_getValue(STORAGE.SET_TAB, SET_TABS[0]) || SET_TABS[0]);
-  syncSectionState();                  // 顺带初始化悬浮球角标
+  syncSectionState();
   loadPos();
  }
-
- // ===== 脚本入口 =====
  try {
   if (document.body) ncInit();
   else document.addEventListener('DOMContentLoaded', () => { try { ncInit(); } catch (err) { console.error('[Notion & Feishu & Obsidian Web Clipper] 初始化失败:', err.message || '未知错误'); } }, { once: true });
