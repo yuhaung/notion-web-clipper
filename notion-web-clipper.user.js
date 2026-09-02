@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name Notion & Feishu & Obsidian Web Clipper
 // @namespace https://github.com/yuhaung/notion-web-clipper
-// @version      5.24.0
-// @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。变更日志见脚本头部 v5.16.x ~ v5.23.x 注释与 CHANGELOG.md。
+// @version      5.25.0
+// @description 悬停高亮 + 单击选取，保存至 Notion、飞书文档、Obsidian。变更日志见仓库 CHANGELOG.md，以及脚本头部 v5.16.x 起的注释。
+// @downloadURL https://raw.githubusercontent.com/yuhaung/notion-web-clipper/main/notion-web-clipper.user.js
+// @updateURL   https://raw.githubusercontent.com/yuhaung/notion-web-clipper/main/notion-web-clipper.user.js
 // @author yuhauang
 // @match *://*/*
 // @noframes
@@ -59,7 +61,7 @@
  if (typeof window.__ncCleanup === 'function') { try { window.__ncCleanup(); } catch {   } }
  const _cleanupFns = [];
  window.__ncCleanup = () => { for (const fn of _cleanupFns) { try { fn(); } catch {   } } _cleanupFns.length = 0; };
-const SCRIPT_VERSION = '5.24.0';
+const SCRIPT_VERSION = '5.25.0';
  const C = Object.freeze({
   TEXT_SAFE: 1990, RT_ITEMS_MAX: 100, BATCH_SIZE: 100,
   TABLE_MAX_COLS: 5, TABLE_MAX_ROWS: 100, TAG_NAME_MAX: 100, URL_MAX: 2000,
@@ -371,8 +373,12 @@ function parseResponseHeader(res, name) {
    if (link) first.text.link = { url: link };
    if (annots) first.annotations = annots;
    out.push(first);
-   for (let i = C.TEXT_SAFE; i < content.length && out.length < C.RT_ITEMS_MAX; i += C.TEXT_SAFE)
-    out.push({ type: 'text', text: { content: content.slice(i, i + C.TEXT_SAFE) } });
+   for (let i = C.TEXT_SAFE; i < content.length && out.length < C.RT_ITEMS_MAX; i += C.TEXT_SAFE) {
+    const rest = { type: 'text', text: { content: content.slice(i, i + C.TEXT_SAFE) } };
+    if (link) rest.text.link = { url: link };
+    if (annots) rest.annotations = annots;
+    out.push(rest);
+   }
   }
   return out;
  }
@@ -566,9 +572,9 @@ function parseResponseHeader(res, name) {
    const type = b.type;
    if (type === 'paragraph') out.push(indent + richToMd(b.paragraph?.rich_text) + '\n\n');
    else if (type.startsWith('heading_')) { const lv = parseInt(type.split('_')[1], 10) || 1; out.push(indent + '#'.repeat(lv) + ' ' + richToMd(b[type]?.rich_text) + '\n\n'); }
-   else if (type === 'bulleted_list_item') { out.push(indent + '- ' + richToMd(b[type]?.rich_text).replace(/\n/g, '\n  ') + '\n'); if (Array.isArray(b[type]?.children) && b[type].children.length) out.push(blocksToMarkdown(b[type].children, indent + '  ')); }
-   else if (type === 'numbered_list_item') { out.push(indent + '1. ' + richToMd(b[type]?.rich_text).replace(/\n/g, '\n   ') + '\n'); if (Array.isArray(b[type]?.children) && b[type].children.length) out.push(blocksToMarkdown(b[type].children, indent + '   ')); }
-   else if (type === 'quote') out.push(indent + '> ' + richToMd(b.quote?.rich_text).replace(/\n/g, '\n> ') + '\n\n');
+   else if (type === 'bulleted_list_item') { out.push(indent + '- ' + richToMd(b[type]?.rich_text).replace(/\n/g, '\n' + indent + '  ') + '\n'); if (Array.isArray(b[type]?.children) && b[type].children.length) out.push(blocksToMarkdown(b[type].children, indent + '  ')); }
+   else if (type === 'numbered_list_item') { out.push(indent + '1. ' + richToMd(b[type]?.rich_text).replace(/\n/g, '\n' + indent + '   ') + '\n'); if (Array.isArray(b[type]?.children) && b[type].children.length) out.push(blocksToMarkdown(b[type].children, indent + '   ')); }
+   else if (type === 'quote') out.push(indent + '> ' + richToMd(b.quote?.rich_text).replace(/\n/g, '\n' + indent + '> ') + '\n\n');
    else if (type === 'code') { const lang = b.code?.language || ''; out.push(indent + '```' + lang + '\n' + rtStr(b.code?.rich_text) + '\n```\n\n'); }
    else if (type === 'image') { const url = b.image?.external?.url || ''; out.push(DATA_IMG_RE.test(url) ? indent + '🖼️ [内嵌图片(data:)，已略过]\n\n' : indent + `![](${mdUrl(url)})\n\n`); }
    else if (type === 'video' || type === 'embed') { const url = b[type]?.external?.url || b[type]?.url || ''; out.push(indent + `[媒体链接](${mdUrl(url)})\n\n`); }
@@ -2509,6 +2515,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
        const line = (row.table_row?.cells || []).map(cellText).join(' | ');
        if (line.trim()) parts.push(line);
       }
+      continue;
      }
      const kids = b[b.type]?.children;
      if (Array.isArray(kids) && kids.length) collectLines(kids);
@@ -2590,7 +2597,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     const ae = (e.composedPath && e.composedPath()[0]) || e.target;
     if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
     e.preventDefault(); el.pv.focus();
-    const sel = window.getSelection();
+    const sel = (typeof shadow.getSelection === 'function' ? shadow.getSelection() : null) || window.getSelection();
     if (sel) {
      const range = document.createRange(); range.selectNodeContents(el.pv);
      sel.removeAllRanges(); sel.addRange(range);
@@ -2609,6 +2616,11 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (el.dirtyFlag) el.dirtyFlag.style.display = 'none';
    return true;
   }
+  function closeErrPanel() {
+   if (!cachedSend) { el.ovErr.style.display = 'none'; return; }
+   askConfirm({ title: '放弃这次剪藏？', okText: '放弃', danger: true, message: '关闭后这次剪藏的内容将不再保留，需要回到页面重新选取。\n\n确定要关闭吗？' })
+    .then((ok) => { if (!ok) return; el.ovErr.style.display = 'none'; cachedSend = null; });
+  }
   function onModalEsc(e) {
    if (e.key !== 'Escape') return;
    const ov = [el.ovAsk, el.ovSet, el.ovCfm, el.ovErr, el.ovOk].find((o) => o.style.display === 'flex');
@@ -2618,6 +2630,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (ov === el.ovAsk) { closeAsk(false); return; }
    if (ov === el.ovSet) { tryCloseSettings().then((ok) => { if (ok) closeSettings(); }); return; }
    if (ov === el.ovCfm) { if (sending) { requestStopSend(); return; } closeConfirm(); return; }
+   if (ov === el.ovErr) { closeErrPanel(); return; }
    ov.style.display = 'none';
    clearTimeout(okAutoCloseTimer); stopOkCountdown();
   }
@@ -3204,7 +3217,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
      throw err;
     }
     if (probe.status === 404) return encodedPath;
-    if (probe.status !== 200) throw new Error(`探测目标笔记失败（HTTP ${probe.status}），已中止写入以避免覆盖`);
+    if (probe.status !== 200) { const e = new Error(`探测目标笔记失败（HTTP ${probe.status}），已中止写入以避免覆盖`); e.status = probe.status; throw e; }
     const altRel = relPath.replace(/(\.md)$/i, ` ${fileStamp()}$1`);
     return altRel.split('/').filter(Boolean).map(encodeURIComponent).join('/');
    };
@@ -3228,7 +3241,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    }, {
     retries: C.OBS_RETRY,
     signal,
-    retryOn: (err) => err.network || err.status === 423 || err.status === 500,
+    retryOn: (err) => err.status === 423 || isRetryableError(err),
    });
    if (onProgress) onProgress(65, '正在排队写入…');
    try {
@@ -3815,11 +3828,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
    if (!cachedSend) { toast('没有可复制的内容', 'error'); return; }
    copyBlocksMd(cachedSend.blocks, resolveSendTitle(cachedSend.title), cachedSend.tags || '');
   }, { signal });
-  el.errClose.addEventListener('click', () => {
-   if (!cachedSend) { el.ovErr.style.display = 'none'; return; }
-   askConfirm({ title: '放弃这次剪藏？', okText: '放弃', danger: true, message: '关闭后这次剪藏的内容将不再保留，需要回到页面重新选取。\n\n确定要关闭吗？' })
-    .then((ok) => { if (!ok) return; el.ovErr.style.display = 'none'; cachedSend = null; });
-  }, { signal });
+  el.errClose.addEventListener('click', closeErrPanel, { signal });
   el.errGotoSet.addEventListener('click', () => {
    const tab = el.errGotoSet.dataset.tab || 'general';
    el.ovErr.style.display = 'none';
