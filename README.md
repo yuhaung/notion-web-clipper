@@ -2,7 +2,7 @@
 
 > 悬停高亮 + 单击选取，一键剪藏到 **Notion**、**飞书文档** 与 **Obsidian**。
 
-![Version](https://img.shields.io/badge/version-5.7.1-2383e2) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/Tampermonkey%2FViolentmonkey-supported-orange)
+![Version](https://img.shields.io/badge/version-5.25.0-2383e2) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/Tampermonkey%2FViolentmonkey-supported-orange)
 
 一个轻量、无依赖的浏览器油猴脚本（userscript）：在任意网页上**悬停高亮**目标元素、**单击**提取内容，经确认弹窗校验后写入三大笔记平台。内置知乎 / Twitter 专属解析、图片智能上传、失败重试与限流治理，长期用于日常知识沉淀。
 
@@ -28,7 +28,7 @@
 
 1. 安装浏览器扩展：[Tampermonkey](https://www.tampermonkey.net/)（Chrome / Edge / Firefox）或 [Violentmonkey](https://violentmonkey.github.io/)。
 2. 安装脚本：
-   - 方式一：打开本仓库的 `notion-feishu-obsidian-clipper.user.js` 原始文件页（Raw），Tampermonkey 会弹出安装确认。
+   - 方式一：打开本仓库的 `notion-web-clipper.user.js` 原始文件页（Raw），Tampermonkey 会弹出安装确认。
    - 方式二：复制脚本全文 → 新建用户脚本 → 粘贴保存。
 3. 打开任意网页，右下角出现悬浮按钮 ✂️ 即安装成功。
 
@@ -127,10 +127,14 @@
 
 ## 📜 版本历史
 
-- **v5.7.1** — 修复 Ctrl+Enter 连按导致整份内容双发；修复 IPv6 内网地址绕过 SSRF 防护；Twitter 会话提取增规模护栏 + `Alt+单击` 单条模式；平台未配置时不再残留选取模式；失败弹窗「复制 Markdown」扩展至任意平台；坏图 30s 负缓存；Obsidian 写入重试幂等化（防换名双写）；补充 CSDN / 掘金 / 少数派 / 网易图床白名单；多项防御性加固。
-- **v5.7.0** — 新增「发送节奏」档位（温和 / 标准）；修复弹窗被阻止误报；Obsidian 未配置 API Key 不再默认发送；深层 DETAILS / 列表递归深度护栏；Markdown front matter 补转义。
-- **v5.6.0** — 选取模式 ↑/↓ 调整范围；新增「禁用站点」黑名单与「域名默认标签」。
-- **v5.5.0** — 修复监听累积泄漏、重试后快捷键失效、PRE/TABLE 悬停被外层抢占；复制 / Markdown 补齐表格与折叠块；推文正文剔除操作栏计数；图片缓存增总字节上限；新增追加模式、发送中防误关页面、进度条单调推进、重试保留已成功平台。
+完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。以下为最近三个版本的摘要：
+
+- **v5.25.0** — 外部审查报告复核后的修复专项（5 项修复 + 3 项驳回）：修复失败面板按 `Esc` 关闭时绕过二次确认（与关闭按钮行为不一致，误按即静默丢失内容）；修复 Obsidian 探测遇瞬态 5xx 不重试、本可恢复的写入被判死；修复嵌套列表 / 引用的续行缩进丢失；修复超长链接分片丢失链接与格式。另补上 `@downloadURL` / `@updateURL`——此前两者缺失，Tampermonkey 无从自动检查更新，只能手动重装；新增独立的 `CHANGELOG.md`，版本历史自此从 README 抽离。
+- **v5.24.0** — 飞书发送链路缺陷修复专项（6 处 + 1 项驳回）：修复 `rootDegradeAppended` 从未声明，导致每次飞书发送都在内容写完后抛 `ReferenceError`、文档已落库却报「发送失败」；修复图片上传阶段「停止」被吞、流程走完却谎报「发送完成」；另修复中止重试重复写入、降级子树删错根文档正文、续传边界前移等问题。
+- **v5.23.0** — 独立交叉审查后的缺陷修复专项（16 处）：修复「链接里的图片 / 视频被整块丢弃」（最高危——`<a href><img></a>` 里的媒体永远走不到 IMG 分支，等于配图全没）；修复 Notion 分块体积估算系统性偏小，大表格请求体超限被拒且重试原样复现。
+
+> ⚠️ **v5.8.0 ~ v5.18.0 的变更说明已不可考** —— 这些版本均通过 GitHub 网页端直接上传，
+> 提交信息为默认的「Update file」，原始变更记录未留存。若你保留了当时的本地副本，欢迎补充。
 
 ---
 
